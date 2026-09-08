@@ -237,11 +237,42 @@ public final class S124ExchangeSetFactory {
     private static final String CATALOG_XML = ROOT_DIR + CATALOG_FILE_NAME;
     private static final String CATALOG_SIGN = ROOT_DIR + "CATALOG.SIGN";
     /**
-     * The form a dataset file name takes in the catalogue, whose fileName element is typed
-     * {@code xs:anyURI} - and which S-100 Part 17, clause 17-4.4.1, has a cancellation reproduce
-     * verbatim, so the prefix is part of the value a cancelled dataset is identified by.
+     * The URI scheme a catalogue file name is spelled with, per S-100 Part 1, clause 1-4.6:
+     * "attributes holding references to support files should be of URI attribute types and comply
+     * with the syntax in RFC 8089". Named separately from {@link #DATASET_FILE_URI_PREFIX} so the
+     * scheme and the path a catalogue file name is built from stay legible apart.
      */
     private static final String FILE_URI_PREFIX = "file:/";
+    /**
+     * The form a dataset file name takes in the catalogue, whose fileName element is typed
+     * {@code xs:anyURI} - and which S-100 Part 17, clause 17-4.4.1, has a cancellation reproduce
+     * verbatim, so this whole prefix is part of the value a cancelled dataset is identified by.
+     * <p/>
+     * The path is the one this factory packages the dataset under, expressed relative to
+     * {@value #CATALOG_FILE_NAME}, which clause 17-4.2 item 7 places in {@code S100_ROOT} - hence
+     * the {@code S100_ROOT/} segment itself is absent. It is derived from
+     * {@link #DATASET_FILES_DIR} so the catalogue and the archive cannot drift apart.
+     * <p/>
+     * Neither S-100 Ed 5.2.0 nor S-124 Ed 2.0.0 mandates this form: Part 17, clause 17-2.2, states
+     * its conformance test as schema validation alone, and the element is an unfaceted
+     * {@code xs:anyURI}, so a bare file name conforms too. Nor does the validation authority
+     * S-124, clause 8.11.1, defers to: of the 58 Part 17 checks in the published S-158:100 Ed 1.0.0
+     * that S-158:124 adopts wholesale for S-124 exchange sets, not one constrains this element -
+     * the file-name checks there are about the packaged file's own name, or are scoped to
+     * {@code S100_SupportFileDiscoveryMetadata}. It is emitted for interoperability. The
+     * S-124 exchange sets of the IHO S-164 test data - what a consumer is certified against - all
+     * spell it this way, and the S-100 client implementations that resolve a fileName do so by
+     * stripping the scheme and joining the remainder onto the directory holding
+     * {@value #CATALOG_FILE_NAME}, which locates a dataset only if the product path is present.
+     * S-124 Ed 2.0.0, clause 12.2.2, points the same way: alone among the discovery-metadata file
+     * names it is annotated "including how to capture the path of the file". So does the only
+     * place in the S-158 corpus that discusses this element against a path - the working draft of
+     * S-158:100 Ed 2.0.0 exempts the pair from check 100_0324's consistency comparison because
+     * "datasetFileIdentifier excludes path information and will not be a URI", which is also why
+     * {@code datasetFileIdentifier} keeps the bare name here.
+     */
+    private static final String DATASET_FILE_URI_PREFIX =
+            FILE_URI_PREFIX + DATASET_FILES_DIR.substring(ROOT_DIR.length());
 
     private final Builder cfg;
 
@@ -334,7 +365,7 @@ public final class S124ExchangeSetFactory {
         for (int i = 0; i < datasetFiles.size(); i++) {
             DatasetFile df = datasetFiles.get(i);
             S100DatasetDiscoveryMetadata entry = i < entries.size() ? entries.get(i) : null;
-            String expected = FILE_URI_PREFIX + df.fileName;
+            String expected = DATASET_FILE_URI_PREFIX + df.fileName;
             if (entry == null || !expected.equals(entry.getFileName())) {
                 throw new ExchangeSetException(String.format(
                         "Internal invariant violated: the catalogue entry published for the dataset "
@@ -434,13 +465,16 @@ public final class S124ExchangeSetFactory {
      * @param fileName          the bare S-100 Part 17, clause 17-4.3, name of the packaged file
      *                          ({@code 124<producer code><unique code>.GML}): the ZIP entry name
      *                          under {@code S100_ROOT/S-124/DATASET_FILES/} without that directory
-     *                          prefix and without the {@code file:/} prefix. Explicitly,
+     *                          prefix and without a URI scheme. Explicitly,
      *                          {@code discoveryMetadata().getFileName()} is
-     *                          {@code "file:/" + fileName()}, because the catalogue element is
-     *                          typed {@code xs:anyURI} and clause 17-4.4.1 makes the cancellation
-     *                          reproduce that URI form verbatim. This is the only place the name
-     *                          can be read off for a dataset that declares neither a {@code gml:id}
-     *                          nor a {@code datasetFileIdentifier}
+     *                          {@code "file:/S-124/DATASET_FILES/" + fileName()}, because the
+     *                          catalogue element is typed {@code xs:anyURI} and carries the
+     *                          dataset's path relative to {@code CATALOG.XML}; see
+     *                          {@link #DATASET_FILE_URI_PREFIX}. The component stays bare - it is
+     *                          the name a producer persists to cancel the dataset by later, so it
+     *                          did not change when the catalogue's spelling of it did. This is the
+     *                          only place the name can be read off for a dataset that declares
+     *                          neither a {@code gml:id} nor a {@code datasetFileIdentifier}
      * @param discoveryMetadata the object that was marshalled into {@code CATALOG.XML} for this
      *                          dataset, live and not copied. No defensive copy is made because the
      *                          catalogue has already been serialized and signed by the time the
@@ -541,10 +575,13 @@ public final class S124ExchangeSetFactory {
      * withdraws a dataset rather than publishing one, can never itself be the {@code original} of a
      * further cancellation, and shares the file name of the entry it cancels - so returning it
      * would collide on the key. They come back in catalogue order, in an unmodifiable map keyed by
-     * the bare file name, the same string {@link PublishedDataset#fileName()} carries: the
-     * {@code file:/} prefix of the catalogue's {@code xs:anyURI} value is stripped when present,
-     * and a foreign producer's value that does not use that form is taken unchanged. An entry
-     * recovered here and one taken from {@link PublishedDataset#discoveryMetadata()} are
+     * the bare file name, the same string {@link PublishedDataset#fileName()} carries: the last
+     * path segment of the catalogue's {@code xs:anyURI} value, with any URI scheme removed. Keying
+     * on that rather than on the value whole is what lets a producer look an entry up by the name
+     * it stored, whatever a catalogue spells around it - this factory's
+     * {@code file:/S-124/DATASET_FILES/}, the bare {@code file:/} form it wrote before 0.3.1, or a
+     * foreign producer's path, Windows separators or absent scheme all reduce to the same key. An
+     * entry recovered here and one taken from {@link PublishedDataset#discoveryMetadata()} are
      * interchangeable as a {@link Cancellation#original()}. An empty map is a legitimate result:
      * a cancellation-only exchange set publishes no dataset.
      * <p/>
@@ -612,11 +649,15 @@ public final class S124ExchangeSetFactory {
                                 + "cancels a dataset by exactly that name",
                         CATALOG_XML));
             }
-            // A foreign producer's catalogue need not spell the anyURI with the file:/ prefix
-            // this factory writes, so it is stripped only where it is present.
-            String bareName = fileName.startsWith(FILE_URI_PREFIX)
-                    ? fileName.substring(FILE_URI_PREFIX.length())
-                    : fileName;
+            String bareName = bareFileName(fileName);
+            if (bareName.isEmpty()) {
+                throw new ExchangeSetException(String.format(
+                        "The %s carries a newDataset entry whose file name \"%s\" ends in a path "
+                                + "separator, so it names a directory rather than the dataset it "
+                                + "published; S-100 Part 17, clause 17-4.4.1, cancels a dataset by "
+                                + "exactly that name",
+                        CATALOG_XML, fileName));
+            }
             if (byFileName.put(bareName, entry) != null) {
                 throw new ExchangeSetException(String.format(
                         "The %s publishes two datasets as %s, but S-100 Part 17, clause 17-4.3, "
@@ -625,6 +666,32 @@ public final class S124ExchangeSetFactory {
             }
         }
         return Collections.unmodifiableMap(byFileName);
+    }
+
+    /**
+     * The bare dataset file name a catalogue's {@code xs:anyURI} value identifies: its last path
+     * segment, with any URI scheme removed.
+     * <p/>
+     * The value is keyed on this rather than taken whole because what precedes the name is a
+     * producer's spelling of where the file sits, and the same dataset must key alike however it is
+     * spelled. This factory writes {@link #DATASET_FILE_URI_PREFIX}, wrote a bare
+     * {@code file:/}-prefixed name before 0.3.1, and a foreign producer may write the path from the
+     * archive root, no scheme at all, Windows separators, or the {@code file::NAME} form S-100
+     * Part 17, Table 17-1, prints. S-100 Part 17, clause 17-4.3, requires "all base dataset
+     * filenames must be unique", so reducing to the bare name cannot collide where the full values
+     * would not have.
+     */
+    private static String bareFileName(String fileName) {
+        String value = fileName;
+        int separator = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'));
+        if (separator >= 0) {
+            value = value.substring(separator + 1);
+        }
+        // A scheme goes with the path above where the value has one, but "file::101GB00400797.TXT"
+        // - the file reference S-100 Part 17, Table 17-1, prints - carries no separator at all. A
+        // colon cannot occur in an S-100 dataset file name, so cutting at the last one is safe.
+        int scheme = value.lastIndexOf(':');
+        return scheme >= 0 ? value.substring(scheme + 1) : value;
     }
 
     private List<DatasetFile> marshalDatasets() throws JAXBException {
@@ -1267,7 +1334,7 @@ public final class S124ExchangeSetFactory {
                     : null;
 
             catBuilder.addDatasetMetadata(builder -> s124Profile(builder
-                    .setFileName(FILE_URI_PREFIX + df.fileName)
+                    .setFileName(DATASET_FILE_URI_PREFIX + df.fileName)
                     .setDatasetID(datasetId(preamble, df))
                     .setDescription(datasetDescription(preamble))
                     .setCompressionFlag(false)
@@ -1317,6 +1384,11 @@ public final class S124ExchangeSetFactory {
             // Clause 17-4.4.1 requires every other mandatory field to keep the value it had in
             // the original, so the original entry is reproduced rather than rebuilt from the
             // current configuration, which may have moved on since the dataset was issued.
+            // The file name included: a dataset published before 0.3.1 was announced by its bare
+            // name and is cancelled by that same string, never rewritten to carry the path this
+            // factory now emits, because the consumer matches the cancellation against the record
+            // it already holds. A catalogue that cancels an old dataset while publishing a new one
+            // therefore carries both spellings, which is the correct output rather than a defect.
             S100DatasetDiscoveryMetadata entry = copyOf(cancellation.original());
             entry.setPurpose(S100Purpose.CANCELLATION);
             entry.setIssueDate(cancellation.issueDate());

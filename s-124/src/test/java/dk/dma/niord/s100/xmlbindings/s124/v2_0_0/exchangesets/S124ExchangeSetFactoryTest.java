@@ -185,7 +185,7 @@ class S124ExchangeSetFactoryTest {
         assertThat(catalogue.getIdentifier().getIdentifier()).startsWith("urn:mrn:iho:s124:exchangeset:");
         List<S100DatasetDiscoveryMetadata> meta = catalogue.getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas();
         assertThat(meta).hasSize(1);
-        assertThat(meta.get(0).getFileName()).startsWith("file:/124DK00");
+        assertThat(meta.get(0).getFileName()).startsWith("file:/S-124/DATASET_FILES/124DK00");
         assertThat(meta.get(0).getProducerCode()).isEqualTo("DK00");
         assertThat(meta.get(0).getDigitalSignatureValues()).hasSize(1);
         // S-124 clause 12.1 removes editionNumber and updateNumber from the dataset discovery
@@ -1529,7 +1529,7 @@ class S124ExchangeSetFactoryTest {
         assertThat(unzip(zipBytes)).containsKey("S100_ROOT/S-124/DATASET_FILES/" + fileName);
         assertThat(catalogueOf(zipBytes).getDatasetDiscoveryMetadata()
                 .getS100DatasetDiscoveryMetadatas().get(0).getFileName())
-                .isEqualTo("file:/" + fileName);
+                .isEqualTo("file:/S-124/DATASET_FILES/" + fileName);
     }
 
     /**
@@ -1854,7 +1854,7 @@ class S124ExchangeSetFactoryTest {
 
         // 2. Cancel it: reuse the original file name and signature, but ship no file. Per
         // S-100 clause 17-4.4.1 the entry carries the issue date of the cancellation itself.
-        String originalFileName = originalMeta.getFileName().substring("file:/".length());
+        String originalFileName = originalMeta.getFileName();
         LocalDate cancellationDate = originalMeta.getIssueDate().plusDays(3);
         S124ExchangeSetFactory.Cancellation cancellation =
                 new S124ExchangeSetFactory.Cancellation(originalMeta, cancellationDate);
@@ -1889,7 +1889,9 @@ class S124ExchangeSetFactoryTest {
                 .filter(m -> m.getPurpose() == S100Purpose.CANCELLATION)
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("no cancellation entry in catalogue"));
-        assertThat(cancelEntry.getFileName()).isEqualTo("file:/" + originalFileName);
+        // Clause 17-4.4.1 identifies the cancelled resource by the name the original entry
+        // carried, so it is reproduced exactly - whatever this library spelled it as.
+        assertThat(cancelEntry.getFileName()).isEqualTo(originalFileName);
         assertThat(cancelEntry.getDatasetID()).isEqualTo(originalMeta.getDatasetID());
         assertThat(cancelEntry.getEditionNumber()).isEqualTo(originalMeta.getEditionNumber());
         assertThat(cancelEntry.getUpdateNumber()).isEqualTo(originalMeta.getUpdateNumber());
@@ -2027,7 +2029,9 @@ class S124ExchangeSetFactoryTest {
 
     /**
      * The name is the bare clause 17-4.3 file name, while the catalogue's fileName is typed
-     * xs:anyURI and carries the file:/ form that clause 17-4.4.1 has a cancellation reproduce
+     * xs:anyURI and carries the packaged path relative to CATALOG.XML, the form the S-124 exchange
+     * sets of the IHO S-164 test data use and the one a client resolves by joining onto the
+     * directory holding the catalogue. Clause 17-4.4.1 has a cancellation reproduce that URI
      * verbatim. Both are needed, so the relation between them is fixed.
      */
     @Test
@@ -2044,7 +2048,82 @@ class S124ExchangeSetFactoryTest {
                 .doesNotContain("/")
                 .doesNotStartWith("file:");
         assertThat(published.discoveryMetadata().getFileName())
-                .isEqualTo("file:/" + published.fileName());
+                .isEqualTo("file:/S-124/DATASET_FILES/" + published.fileName());
+    }
+
+    /**
+     * The catalogue must name the file where the archive actually puts it, so both are derived
+     * from the ZIP rather than compared against a literal: what S-100 Part 17, clause 17-4.2,
+     * fixes as the layout and what clause 12.2.2 of S-124 has the catalogue announce cannot drift
+     * apart without this failing.
+     */
+    @Test
+    void catalogueAnnouncesEachDatasetAtItsArchivePathRelativeToTheCatalogue() throws Exception {
+        byte[] zip = publisher()
+                .datasets(List.of(newDataset("DK.S124.archived-path-a"),
+                        newDataset("DK.S124.archived-path-b")))
+                .build()
+                .toBytes();
+
+        List<String> fromArchive = unzip(zip).keySet().stream()
+                .filter(name -> name.startsWith("S100_ROOT/S-124/DATASET_FILES/")
+                        && name.endsWith(".GML"))
+                .map(name -> "file:/" + name.substring("S100_ROOT/".length()))
+                .sorted()
+                .collect(Collectors.toList());
+        assertThat(fromArchive).hasSize(2);
+
+        List<String> announced = catalogueOf(zip).getDatasetDiscoveryMetadata()
+                .getS100DatasetDiscoveryMetadatas().stream()
+                .map(S100DatasetDiscoveryMetadata::getFileName)
+                .sorted()
+                .collect(Collectors.toList());
+
+        assertThat(announced).isEqualTo(fromArchive);
+    }
+
+    /**
+     * A dataset published before 0.3.1 was announced by its bare file name, and S-100 Part 17,
+     * clause 17-4.4.1, cancels it by the name the consumer already holds - so the stored entry is
+     * reproduced as it stands rather than rewritten into the path form. A catalogue that withdraws
+     * an old dataset while publishing a new one therefore carries both spellings, and both still
+     * key by the bare name a producer stored.
+     */
+    @Test
+    void cancelsAPreviouslyPublishedDatasetUnderTheFileNameItWasPublishedWith() throws Exception {
+        S124ExchangeSetFactory.PublishedDataset published = publisher()
+                .datasets(List.of(newDataset("DK.S124.legacy")))
+                .build()
+                .toExchangeSet()
+                .datasets()
+                .get(0);
+
+        // The row a producer persisted before 0.3.1: the same entry, announcing the bare name.
+        S100DatasetDiscoveryMetadata stored = S124ExchangeSetFactory.discoveryMetadataFromXml(
+                S124ExchangeSetFactory.discoveryMetadataToXml(published.discoveryMetadata()));
+        String legacyFileName = "file:/" + published.fileName();
+        stored.setFileName(legacyFileName);
+
+        byte[] zip = publisher()
+                .datasets(List.of(newDataset("DK.S124.fresh")))
+                .cancellations(List.of(new S124ExchangeSetFactory.Cancellation(
+                        stored, stored.getIssueDate().plusMonths(4))))
+                .build()
+                .toBytes();
+
+        Map<S100Purpose, String> announced = catalogueOf(zip).getDatasetDiscoveryMetadata()
+                .getS100DatasetDiscoveryMetadatas().stream()
+                .collect(Collectors.toMap(S100DatasetDiscoveryMetadata::getPurpose,
+                        S100DatasetDiscoveryMetadata::getFileName));
+
+        assertThat(announced)
+                .containsEntry(S100Purpose.CANCELLATION, legacyFileName)
+                .containsEntry(S100Purpose.NEW_DATASET,
+                        "file:/S-124/DATASET_FILES/" + datasetFileNameOf("DK.S124.fresh"));
+
+        assertThat(S124ExchangeSetFactory.readDiscoveryMetadata(zip).keySet())
+                .as("the new entry keys by its bare name whichever form surrounds it")
+                .containsExactly(datasetFileNameOf("DK.S124.fresh"));
     }
 
     /**
@@ -2170,7 +2249,8 @@ class S124ExchangeSetFactoryTest {
         S100DatasetDiscoveryMetadata emitted = firstEntryOf(cancellationZip);
         assertThat(emitted.getPurpose()).isEqualTo(S100Purpose.CANCELLATION);
         assertThat(emitted.getIssueDate()).isEqualTo(cancelledOn);
-        assertThat(emitted.getFileName()).isEqualTo("file:/" + row.fileName());
+        assertThat(emitted.getFileName())
+                .isEqualTo("file:/S-124/DATASET_FILES/" + row.fileName());
         S100SESignatureOnData reused = dataSignatureOf(emitted);
         S100SESignatureOnData publishedSignature = dataSignatureOf(row.discoveryMetadata());
         assertThat(reused.getValue())
@@ -2339,6 +2419,61 @@ class S124ExchangeSetFactoryTest {
         assertThat(recovered).hasSize(1);
         assertThat(recovered.get(datasetFileNameOf("DK.S124.same-name")).getPurpose())
                 .isEqualTo(S100Purpose.NEW_DATASET);
+    }
+
+    /**
+     * A producer that stored the bare file name has to keep finding its entry however a catalogue
+     * spells the path around it: this library's own pre-0.3.1 form, the path form it writes now,
+     * and what a foreign producer may ship - the archive-root path, no scheme, Windows separators,
+     * or the {@code file::NAME} form of S-100 Part 17, Table 17-1. S-100 Part 17, clause 17-4.3,
+     * makes the bare name unique, so it is a safe key for all of them.
+     */
+    @Test
+    void readDiscoveryMetadataKeysEveryProducerSpellingByTheBareName() throws Exception {
+        String bareName = datasetFileNameOf("DK.S124.spellings");
+        byte[] published = publisher()
+                .datasets(List.of(newDataset("DK.S124.spellings")))
+                .build()
+                .toBytes();
+        String catalogueXml = new String(
+                unzip(published).get("S100_ROOT/CATALOG.XML"), StandardCharsets.UTF_8);
+        String written = "file:/S-124/DATASET_FILES/" + bareName;
+        assertThat(catalogueXml).contains(written);
+
+        List<String> spellings = List.of(
+                written,
+                "file:/S100_ROOT/S-124/DATASET_FILES/" + bareName,
+                "S-124/DATASET_FILES/" + bareName,
+                "S-124\\DATASET_FILES\\" + bareName,
+                "file:/" + bareName,
+                "file::" + bareName,
+                bareName);
+
+        for (String spelling : spellings) {
+            byte[] zip = zipWithCatalogue(catalogueXml.replace(written, spelling));
+
+            assertThat(S124ExchangeSetFactory.readDiscoveryMetadata(zip).keySet())
+                    .as("catalogue file name %s", spelling)
+                    .containsExactly(bareName);
+        }
+    }
+
+    /** A value that is all path and no name identifies no dataset, so it is refused rather than keyed as "". */
+    @Test
+    void readDiscoveryMetadataRejectsAFileNameThatIsOnlyAPath() throws Exception {
+        String bareName = datasetFileNameOf("DK.S124.pathonly");
+        byte[] published = publisher()
+                .datasets(List.of(newDataset("DK.S124.pathonly")))
+                .build()
+                .toBytes();
+        String catalogueXml = new String(
+                unzip(published).get("S100_ROOT/CATALOG.XML"), StandardCharsets.UTF_8);
+        byte[] zip = zipWithCatalogue(catalogueXml.replace(
+                "file:/S-124/DATASET_FILES/" + bareName, "file:/S-124/DATASET_FILES/"));
+
+        assertThatThrownBy(() -> S124ExchangeSetFactory.readDiscoveryMetadata(zip))
+                .isInstanceOf(S124ExchangeSetFactory.ExchangeSetException.class)
+                .hasMessageContaining("path separator");
     }
 
     @Test
@@ -2720,6 +2855,20 @@ class S124ExchangeSetFactoryTest {
                 .add(newPreamble("PR.1"));
 
         return dataset;
+    }
+
+    /**
+     * The smallest thing {@link S124ExchangeSetFactory#readDiscoveryMetadata(byte[])} accepts: it
+     * reads only the catalogue, so a test that varies the catalogue need ship nothing else.
+     */
+    private static byte[] zipWithCatalogue(String catalogueXml) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(out)) {
+            zos.putNextEntry(new ZipEntry("S100_ROOT/CATALOG.XML"));
+            zos.write(catalogueXml.getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+        return out.toByteArray();
     }
 
     private static Map<String, byte[]> unzip(byte[] data) throws Exception {
