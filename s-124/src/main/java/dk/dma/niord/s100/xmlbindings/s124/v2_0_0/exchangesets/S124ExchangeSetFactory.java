@@ -255,13 +255,21 @@ public final class S124ExchangeSetFactory {
      * <p/>
      * Neither S-100 Ed 5.2.0 nor S-124 Ed 2.0.0 mandates this form: Part 17, clause 17-2.2, states
      * its conformance test as schema validation alone, and the element is an unfaceted
-     * {@code xs:anyURI}, so a bare file name conforms too. It is emitted for interoperability. The
+     * {@code xs:anyURI}, so a bare file name conforms too. Nor does the validation authority
+     * S-124, clause 8.11.1, defers to: of the 58 Part 17 checks in the published S-158:100 Ed 1.0.0
+     * that S-158:124 adopts wholesale for S-124 exchange sets, not one constrains this element -
+     * the file-name checks there are about the packaged file's own name, or are scoped to
+     * {@code S100_SupportFileDiscoveryMetadata}. It is emitted for interoperability. The
      * S-124 exchange sets of the IHO S-164 test data - what a consumer is certified against - all
      * spell it this way, and the S-100 client implementations that resolve a fileName do so by
      * stripping the scheme and joining the remainder onto the directory holding
      * {@value #CATALOG_FILE_NAME}, which locates a dataset only if the product path is present.
      * S-124 Ed 2.0.0, clause 12.2.2, points the same way: alone among the discovery-metadata file
-     * names it is annotated "including how to capture the path of the file".
+     * names it is annotated "including how to capture the path of the file". So does the only
+     * place in the S-158 corpus that discusses this element against a path - the working draft of
+     * S-158:100 Ed 2.0.0 exempts the pair from check 100_0324's consistency comparison because
+     * "datasetFileIdentifier excludes path information and will not be a URI", which is also why
+     * {@code datasetFileIdentifier} keeps the bare name here.
      */
     private static final String DATASET_FILE_URI_PREFIX =
             FILE_URI_PREFIX + DATASET_FILES_DIR.substring(ROOT_DIR.length());

@@ -142,15 +142,28 @@ the header is part of the signed payload.
 In the catalogue, each dataset is announced as
 `file:/S-124/DATASET_FILES/124DK00DKNW01126.GML` — the path the archive packages it
 under, relative to `CATALOG.XML`, which S-100 Part 17, clause 17-4.2, puts in
-`S100_ROOT`, so the `S100_ROOT/` segment itself is absent. Neither S-100 Ed 5.2.0
-nor S-124 Ed 2.0.0 mandates this form: the `fileName` element is an unfaceted
-`xs:anyURI` and Part 17 states its conformance test as schema validation alone. It
-is emitted for interoperability — the S-124 exchange sets of the IHO S-164 test
-data all spell it this way, and clients resolve a `fileName` by stripping the
-scheme and joining the remainder onto the directory holding the catalogue, which
-locates a dataset only when the product path is present. The GML header's
-`datasetFileIdentifier` stays the bare name, as S-100 Part 10b, Table 10b-4,
-requires; the two deliberately differ.
+`S100_ROOT`, so the `S100_ROOT/` segment itself is absent.
+
+Nothing mandates this form. The `fileName` element is an unfaceted `xs:anyURI`,
+Part 17 states its conformance test as schema validation alone, and the validation
+authority S-124 clause 8.11.1 defers to does not constrain it either: of the 58
+Part 17 checks in the published S-158:100 Ed 1.0.0 — which S-158:124 adopts
+wholesale for S-124 exchange sets — not one bears on this element. It is emitted
+for interoperability, and every non-check signal runs the same way:
+
+- The S-124 exchange sets of the [IHO S-164 test data](https://github.com/iho-ohi/S-164-Sub-Group)
+  all spell it this way, over a folder layout identical to ours.
+- Clients resolve a `fileName` by stripping the scheme and joining the remainder
+  onto the directory holding the catalogue, which locates a dataset only when the
+  product path is present.
+- S-124 Ed 2.0.0, clause 12.2.2, annotates this element — alone among the
+  discovery-metadata file names — "including how to capture the path of the file".
+- The working draft of S-158:100 Ed 2.0.0 exempts `datasetFileIdentifier` and
+  `fileName` from check 100_0324's consistency comparison because
+  "datasetFileIdentifier excludes path information and will not be a URI".
+
+That last point is also why the GML header's `datasetFileIdentifier` stays the bare
+name, as S-100 Part 10b, Table 10b-4, requires; the two deliberately differ.
 
 ## Checks and defaults
 
