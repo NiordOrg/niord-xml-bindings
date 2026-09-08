@@ -139,6 +139,19 @@ checks its format and producer prefix. It rejects duplicate filenames and invali
 declared names. Keeping the header and packaged filename aligned matters because
 the header is part of the signed payload.
 
+In the catalogue, each dataset is announced as
+`file:/S-124/DATASET_FILES/124DK00DKNW01126.GML` — the path the archive packages it
+under, relative to `CATALOG.XML`, which S-100 Part 17, clause 17-4.2, puts in
+`S100_ROOT`, so the `S100_ROOT/` segment itself is absent. Neither S-100 Ed 5.2.0
+nor S-124 Ed 2.0.0 mandates this form: the `fileName` element is an unfaceted
+`xs:anyURI` and Part 17 states its conformance test as schema validation alone. It
+is emitted for interoperability — the S-124 exchange sets of the IHO S-164 test
+data all spell it this way, and clients resolve a `fileName` by stripping the
+scheme and joining the remainder onto the directory holding the catalogue, which
+locates a dataset only when the product path is present. The GML header's
+`datasetFileIdentifier` stays the bare name, as S-100 Part 10b, Table 10b-4,
+requires; the two deliberately differ.
+
 ## Checks and defaults
 
 Before signing a dataset, the factory completes missing codes, checks the
@@ -181,6 +194,13 @@ A fileless cancellation is a catalogue entry that tells a consumer to remove a
 previous dataset. It retains the original filename, signature and mandatory
 metadata, sets its purpose to cancellation and ships no replacement dataset file.
 
+The filename is retained exactly as the original entry carried it, because clause
+17-4.4.1 has the consumer match the cancellation against the record it already
+holds. A dataset published before 0.4.0 was announced by its bare name and is
+withdrawn under that same string, never rewritten into the path form. A catalogue
+that cancels an old dataset while publishing a new one therefore carries both
+spellings; that is the correct output, not a defect.
+
 Create `new S124ExchangeSetFactory.Cancellation(originalMetadata, issueDate)` and
 pass the entries to `builder.cancellations(...)`. A cancellation-only
 set still needs the organization, producer code, certificate and signer because
@@ -211,7 +231,9 @@ var cancellation = new S124ExchangeSetFactory.Cancellation(
 `set.datasets()` has one entry per dataset, at the index that dataset has in
 `datasets(...)`, and `published.dataset()` is the object you passed in — the file
 name is not predictable at publish time, so join on the dataset rather than on the
-name.
+name. `published.fileName()` is the bare `124….GML` name, deliberately not the
+catalogue URI, so the column above needs no migration when the catalogue's spelling
+of it changes.
 
 **What to store.** The entry is a schema-defined `S100_DatasetDiscoveryMetadata`
 document of roughly 4.5 kB, so the column must be CLOB/TEXT, not VARCHAR. It
@@ -247,11 +269,16 @@ once, and the reused signature references the current entry.
 
 `S124ExchangeSetFactory.readDiscoveryMetadata(zipBytes)` returns the
 `purpose=newDataset` entries of an already-built exchange set, keyed by the
-`124….GML` file name a producer already stores. Use it for warnings published
-before `toExchangeSet()` existed: the shipped catalogue is the only faithful record
-of the original, and the entry must be reproduced unchanged. It is not the
-publish-time path — it re-parses what the factory had in hand, and it can only tell
-datasets apart by file name.
+`124….GML` file name a producer already stores — the last path segment of the
+catalogue's `xs:anyURI` value, with any URI scheme removed. Keying on that rather
+than on the value whole is what makes the lookup work across sets written before
+and after 0.4.0, and across foreign producers who write a path, Windows separators
+or no scheme at all.
+
+Use it for warnings published before `toExchangeSet()` existed: the shipped
+catalogue is the only faithful record of the original, and the entry must be
+reproduced unchanged. It is not the publish-time path — it re-parses what the
+factory had in hand, and it can only tell datasets apart by file name.
 
 The catalogue is parsed as foreign XML: `SecureXmlSource` refuses a `<!DOCTYPE>`
 outright, so an external entity cannot read a file off the reading host or make it
@@ -265,6 +292,24 @@ What is **not** covered: the ZIP is not size-bounded. `CATALOG.XML` is read with
 `readAllBytes()`, so a decompression bomb still exhausts the heap of whatever reads
 it. Bound the archive where you accept it — only you know what a legitimate exchange
 set weighs in your deployment.
+
+### Migrating from 0.3.0
+
+The catalogue now announces each dataset as
+`file:/S-124/DATASET_FILES/124….GML` instead of `file:/124….GML`. Only the emitted
+XML changes: the Java API is source- and binary-compatible, `published.fileName()`
+is still the bare name, and no stored row needs migrating. Cancellations of
+datasets published before this release keep the name they were published under, by
+design (see above).
+
+This was not a conformance defect — the element is an unfaceted `xs:anyURI` — but
+the bare form does not resolve for a client that joins the value onto the
+catalogue's directory, which is what the surveyed S-100 clients do and what the
+IHO S-164 S-124 test data assumes.
+
+One thing to check before upgrading: if your consumer compensates today by
+prepending `S-124/DATASET_FILES/` to the bare name itself, it will double the path
+and must stop doing so.
 
 ### Migrating from 0.0.12
 
