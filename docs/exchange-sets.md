@@ -209,7 +209,7 @@ metadata, sets its purpose to cancellation and ships no replacement dataset file
 
 The filename is retained exactly as the original entry carried it, because clause
 17-4.4.1 has the consumer match the cancellation against the record it already
-holds. A dataset published before 0.4.0 was announced by its bare name and is
+holds. A dataset published before 0.3.1 was announced by its bare name and is
 withdrawn under that same string, never rewritten into the path form. A catalogue
 that cancels an old dataset while publishing a new one therefore carries both
 spellings; that is the correct output, not a defect.
@@ -285,7 +285,7 @@ once, and the reused signature references the current entry.
 `124….GML` file name a producer already stores — the last path segment of the
 catalogue's `xs:anyURI` value, with any URI scheme removed. Keying on that rather
 than on the value whole is what makes the lookup work across sets written before
-and after 0.4.0, and across foreign producers who write a path, Windows separators
+and after 0.3.1, and across foreign producers who write a path, Windows separators
 or no scheme at all.
 
 Use it for warnings published before `toExchangeSet()` existed: the shipped

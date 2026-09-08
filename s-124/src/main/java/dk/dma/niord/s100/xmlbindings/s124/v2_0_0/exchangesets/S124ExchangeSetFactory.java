@@ -579,7 +579,7 @@ public final class S124ExchangeSetFactory {
      * path segment of the catalogue's {@code xs:anyURI} value, with any URI scheme removed. Keying
      * on that rather than on the value whole is what lets a producer look an entry up by the name
      * it stored, whatever a catalogue spells around it - this factory's
-     * {@code file:/S-124/DATASET_FILES/}, the bare {@code file:/} form it wrote before 0.4.0, or a
+     * {@code file:/S-124/DATASET_FILES/}, the bare {@code file:/} form it wrote before 0.3.1, or a
      * foreign producer's path, Windows separators or absent scheme all reduce to the same key. An
      * entry recovered here and one taken from {@link PublishedDataset#discoveryMetadata()} are
      * interchangeable as a {@link Cancellation#original()}. An empty map is a legitimate result:
@@ -675,7 +675,7 @@ public final class S124ExchangeSetFactory {
      * The value is keyed on this rather than taken whole because what precedes the name is a
      * producer's spelling of where the file sits, and the same dataset must key alike however it is
      * spelled. This factory writes {@link #DATASET_FILE_URI_PREFIX}, wrote a bare
-     * {@code file:/}-prefixed name before 0.4.0, and a foreign producer may write the path from the
+     * {@code file:/}-prefixed name before 0.3.1, and a foreign producer may write the path from the
      * archive root, no scheme at all, Windows separators, or the {@code file::NAME} form S-100
      * Part 17, Table 17-1, prints. S-100 Part 17, clause 17-4.3, requires "all base dataset
      * filenames must be unique", so reducing to the bare name cannot collide where the full values
@@ -1384,7 +1384,7 @@ public final class S124ExchangeSetFactory {
             // Clause 17-4.4.1 requires every other mandatory field to keep the value it had in
             // the original, so the original entry is reproduced rather than rebuilt from the
             // current configuration, which may have moved on since the dataset was issued.
-            // The file name included: a dataset published before 0.4.0 was announced by its bare
+            // The file name included: a dataset published before 0.3.1 was announced by its bare
             // name and is cancelled by that same string, never rewritten to carry the path this
             // factory now emits, because the consumer matches the cancellation against the record
             // it already holds. A catalogue that cancels an old dataset while publishing a new one

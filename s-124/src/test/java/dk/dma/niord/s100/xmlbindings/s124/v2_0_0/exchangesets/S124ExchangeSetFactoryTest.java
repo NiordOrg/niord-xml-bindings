@@ -2083,7 +2083,7 @@ class S124ExchangeSetFactoryTest {
     }
 
     /**
-     * A dataset published before 0.4.0 was announced by its bare file name, and S-100 Part 17,
+     * A dataset published before 0.3.1 was announced by its bare file name, and S-100 Part 17,
      * clause 17-4.4.1, cancels it by the name the consumer already holds - so the stored entry is
      * reproduced as it stands rather than rewritten into the path form. A catalogue that withdraws
      * an old dataset while publishing a new one therefore carries both spellings, and both still
@@ -2098,7 +2098,7 @@ class S124ExchangeSetFactoryTest {
                 .datasets()
                 .get(0);
 
-        // The row a producer persisted before 0.4.0: the same entry, announcing the bare name.
+        // The row a producer persisted before 0.3.1: the same entry, announcing the bare name.
         S100DatasetDiscoveryMetadata stored = S124ExchangeSetFactory.discoveryMetadataFromXml(
                 S124ExchangeSetFactory.discoveryMetadataToXml(published.discoveryMetadata()));
         String legacyFileName = "file:/" + published.fileName();
@@ -2423,7 +2423,7 @@ class S124ExchangeSetFactoryTest {
 
     /**
      * A producer that stored the bare file name has to keep finding its entry however a catalogue
-     * spells the path around it: this library's own pre-0.4.0 form, the path form it writes now,
+     * spells the path around it: this library's own pre-0.3.1 form, the path form it writes now,
      * and what a foreign producer may ship - the archive-root path, no scheme, Windows separators,
      * or the {@code file::NAME} form of S-100 Part 17, Table 17-1. S-100 Part 17, clause 17-4.3,
      * makes the bare name unique, so it is a safe key for all of them.
