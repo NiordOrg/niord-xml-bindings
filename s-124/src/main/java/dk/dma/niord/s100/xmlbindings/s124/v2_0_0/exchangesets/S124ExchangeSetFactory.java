@@ -6,6 +6,8 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.time.LocalDate;
@@ -16,6 +18,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -103,6 +106,13 @@ import jakarta.xml.bind.JAXBException;
  * 17-4.4.1) and the stored chain is what authenticates its reused signature once the current
  * certificate has moved on (S-100 Part 15, clause 15-8.7); see {@link Cancellation}.
  * {@link #toBytes()} is the same build with both dropped.</p>
+ *
+ * <p>A dataset shipped again keeps the signature it was published with when the producer hands
+ * that signature back through {@link Builder#reusedSignatures(Map)}: clause 17-4.4.1 has the
+ * consumer match a later cancellation against the signature of the dataset it holds, so the same
+ * bytes must carry the same signature in every exchange set. Once the certificate that made it
+ * has been rotated out, its chain travels along exactly as for a cancellation; see
+ * {@link ReusedSignature}.</p>
  *
  * <p>The signer returns each signature in the form S-100 Part 15, clause 15-8.4, embeds - the
  * ASN.1 DER {@code SEQUENCE} of the ECDSA integers r and s, as {@code java.security.Signature}
@@ -416,8 +426,10 @@ public final class S124ExchangeSetFactory {
      *                               entries are deliberately absent: a {@code purpose=cancellation}
      *                               entry withdraws a dataset rather than publishing one, and can
      *                               never itself be the {@code original} of a further cancellation
-     * @param signingCertificatePems the chain that made every signature in this exchange set,
-     *                               signing certificate first - {@link Builder#certificatePem(String)}
+     * @param signingCertificatePems the chain that made every signature this build made - the
+     *                               catalogue's, and each dataset's not handed back through
+     *                               {@link Builder#reusedSignatures(Map)} - signing certificate
+     *                               first: {@link Builder#certificatePem(String)}
      *                               followed by {@link Builder#intermediateCertificatePems(List)},
      *                               and never empty. It is exactly the list
      *                               {@link Cancellation#certificatePems()} takes, and it is carried
@@ -1124,6 +1136,36 @@ public final class S124ExchangeSetFactory {
     }
 
     /**
+     * Embeds a signature made earlier over a dataset file this exchange set ships again, as it
+     * is and referencing the certificate that made it; see {@link ReusedSignature}. The bytes
+     * were checked for the clause 15-8.4 form when the reference was settled.
+     */
+    private static S100SESignatureOnData signatureOnData(String id, String certificateRef, byte[] signature) {
+        S100SESignatureOnData result = new S100SESignatureOnData();
+        result.setId(id);
+        result.setCertificateRef(certificateRef);
+        result.setDataStatus(DataStatus.UNENCRYPTED);
+        result.setValue(signature);
+        return result;
+    }
+
+    /** A reused dataset signature settled for this build: its bytes and the id of the certificate it references. */
+    private record ReusedDatasetSignature(byte[] signature, String certificateRef) {}
+
+    /**
+     * The key {@link Builder#reusedSignatures(Map)} takes for a dataset file: the SHA-256 digest
+     * of its bytes, as lower-case hexadecimal. The bytes are the dataset file as the factory
+     * packages it - the payload the signer was handed when the signature was first made.
+     */
+    public static String payloadHash(byte[] payload) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(payload));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is not available", e);
+        }
+    }
+
+    /**
      * Checks that a signature the configured signer returned is in the one form S-100 Part 15
      * embeds. Clause 15-8.4: "In the ECDSA algorithm a signature is a sequence of two integers.
      * By convention these are referred to as R and S (an 'R,S pair')... The encoding of the two
@@ -1222,11 +1264,19 @@ public final class S124ExchangeSetFactory {
     private S100ExchangeCatalogue buildCatalogue(List<DatasetFile> datasetFiles)
             throws JAXBException, CertificateException {
         AtomicInteger signatureCounter = new AtomicInteger(1);
+        // Settled below, before the certificates are handed to the catalogue builder, and read
+        // when the builder signs each dataset entry - by the hash of the bytes it signs, which is
+        // what the caller keyed the signature by.
+        Map<String, ReusedDatasetSignature> reusedDatasetSignatures = new LinkedHashMap<>();
 
         S100ExchangeCatalogueBuilder catBuilder = new S100ExchangeCatalogueBuilder(
-                (objectId, algorithm, payload) -> signatureOnData(
-                        String.format("sig%d", signatureCounter.getAndIncrement()), String.valueOf(objectId),
-                        algorithm, payload))
+                (objectId, algorithm, payload) -> {
+                    String id = String.format("sig%d", signatureCounter.getAndIncrement());
+                    ReusedDatasetSignature reused = reusedDatasetSignatures.get(payloadHash(payload));
+                    return reused != null
+                            ? signatureOnData(id, reused.certificateRef(), reused.signature())
+                            : signatureOnData(id, String.valueOf(objectId), algorithm, payload);
+                })
                 .setIdentifier(cfg.identifier)
                 // Part 17 mandates the format yyyy-mm-ddThh:mm:ssZ, i.e. UTC, for the
                 // exchange catalogue identifier's creation date and time.
@@ -1291,6 +1341,32 @@ public final class S124ExchangeSetFactory {
                     certificateChain(cancellation.certificatePems(), "cerC" + cancellationIndex,
                             "caC" + cancellationIndex + "."),
                     certificatesById, certificateIssuers));
+        }
+        // A dataset shipped again under the signature it was published with - the producer's
+        // record of what it published, handed back through Builder.reusedSignatures - references
+        // the certificate that made that signature. After a key rotation that is no longer the
+        // current one, so it travels along like a cancellation's (S-100 Part 15, clause 15-8.7).
+        // The signature is checked for the clause 15-8.4 form here, where the file it covers is
+        // known, rather than when the builder embeds it.
+        int reusedIndex = 0;
+        for (DatasetFile df : datasetFiles) {
+            String hash = payloadHash(df.bytes);
+            ReusedSignature reused = cfg.reusedSignatures.get(hash);
+            if (reused == null) {
+                continue;
+            }
+            String certificateRef;
+            if (reused.certificatePems().isEmpty()) {
+                // No certificate supplied: the signature was made with the current one.
+                certificateRef = CERTIFICATE_REF;
+            } else {
+                reusedIndex++;
+                certificateRef = carry(
+                        certificateChain(reused.certificatePems(), "cerR" + reusedIndex, "caR" + reusedIndex + "."),
+                        certificatesById, certificateIssuers);
+            }
+            reusedDatasetSignatures.put(hash, new ReusedDatasetSignature(
+                    requireDerEcdsaSignature(reused.signature(), df.fileName), certificateRef));
         }
         catBuilder.setCertificates(certificatesById).setCertificateIssuers(certificateIssuers);
 
@@ -1857,6 +1933,7 @@ public final class S124ExchangeSetFactory {
         private String producerCode;
         private String certificatePem;
         private List<String> intermediateCertificatePems = Collections.emptyList();
+        private Map<String, ReusedSignature> reusedSignatures = Collections.emptyMap();
         private S124Signer signer;
 
         private String identifier;
@@ -1912,6 +1989,7 @@ public final class S124ExchangeSetFactory {
             this.producerCode = other.producerCode;
             this.certificatePem = other.certificatePem;
             this.intermediateCertificatePems = copyOfNullable(other.intermediateCertificatePems);
+            this.reusedSignatures = copyOfNullableMap(other.reusedSignatures);
             this.signer = other.signer;
             this.identifier = other.identifier;
             this.dataServerIdentifier = other.dataServerIdentifier;
@@ -1948,6 +2026,11 @@ public final class S124ExchangeSetFactory {
             return list == null ? null : List.copyOf(list);
         }
 
+        /** {@link Map#copyOf} but tolerating null, for the same reason as {@link #copyOfNullable(List)}. */
+        private static <K, V> Map<K, V> copyOfNullableMap(Map<K, V> map) {
+            return map == null ? null : Map.copyOf(map);
+        }
+
         public Builder datasets(List<Dataset> datasets) { this.datasets = datasets; return this; }
         /** Fileless dataset cancellations (S-100 Part 17, clause 17-4.4.1); see {@link Cancellation}. */
         public Builder cancellations(List<Cancellation> cancellations) { this.cancellations = cancellations; return this; }
@@ -1966,6 +2049,16 @@ public final class S124ExchangeSetFactory {
          */
         public Builder intermediateCertificatePems(List<String> pems) {
             this.intermediateCertificatePems = pems == null ? Collections.emptyList() : List.copyOf(pems);
+            return this;
+        }
+
+        /**
+         * Signatures made earlier over dataset files this exchange set ships again, keyed by
+         * {@link #payloadHash(byte[])} of the file bytes; see {@link ReusedSignature}. A dataset
+         * whose bytes match no key is signed by the configured signer.
+         */
+        public Builder reusedSignatures(Map<String, ReusedSignature> reusedSignatures) {
+            this.reusedSignatures = reusedSignatures == null ? Collections.emptyMap() : Map.copyOf(reusedSignatures);
             return this;
         }
         public Builder signer(S124Signer signer) { this.signer = signer; return this; }
@@ -2099,6 +2192,7 @@ public final class S124ExchangeSetFactory {
             }
             Objects.requireNonNull(certificatePem, "certificatePem must be set");
             Objects.requireNonNull(signer, "signer must be set");
+            Objects.requireNonNull(reusedSignatures, "reusedSignatures must be set");
             Objects.requireNonNull(productSpecification, "productSpecification must be set");
             Objects.requireNonNull(signatureAlgorithm, "signatureAlgorithm must be set");
             Objects.requireNonNull(locales, "locales must be set");
@@ -2124,6 +2218,47 @@ public final class S124ExchangeSetFactory {
                         LocalDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
             }
             return new S124ExchangeSetFactory(snapshot);
+        }
+    }
+
+    /**
+     * A signature made earlier over a dataset file this exchange set ships again, together with
+     * the chain that made it.
+     * <p/>
+     * ECDSA is randomised, so signing the same bytes twice yields two different signatures - yet
+     * S-100 Part 17, clause 17-4.4.1, has a consumer match a fileless cancellation against the
+     * signature of the dataset it holds, so every exchange set that ships a dataset version has
+     * to carry the one signature the producer will later cancel it by. A producer therefore signs
+     * a dataset version once, keeps the signature, and hands it back here whenever it ships the
+     * same bytes again: the factory embeds it unchanged instead of asking the signer. The key is
+     * {@link #payloadHash(byte[])} of the file bytes, so a dataset whose bytes have since changed
+     * matches nothing and is signed afresh - a stale signature is never served.
+     * <p/>
+     * Once the certificate that made the signature has been rotated out, the reused signature
+     * cannot reference the current Data Server certificate: the chain that made it travels with
+     * the exchange set and the signature references it (S-100 Part 15, clause 15-8.7) - the
+     * treatment a {@link Cancellation} gets, applied to a dataset that ships as a file. It is
+     * the list {@link ExchangeSet#signingCertificatePems()} returned when the signature was made.
+     *
+     * @param signature       the signature bytes, in the DER form of clause 15-8.4 the signer
+     *                        returned them in
+     * @param certificatePems the chain that verifies the signature, signing certificate first;
+     *                        empty means the exchange set's current Data Server certificate made it
+     */
+    public record ReusedSignature(byte[] signature, List<String> certificatePems) {
+
+        /** A signature the current Data Server certificate made. */
+        public ReusedSignature(byte[] signature) {
+            this(signature, List.of());
+        }
+
+        public ReusedSignature {
+            Objects.requireNonNull(signature, "reused signature bytes must be set");
+            if (signature.length == 0) {
+                throw new IllegalArgumentException("reused signature bytes must not be empty");
+            }
+            signature = signature.clone();
+            certificatePems = certificatePems == null ? List.of() : List.copyOf(certificatePems);
         }
     }
 

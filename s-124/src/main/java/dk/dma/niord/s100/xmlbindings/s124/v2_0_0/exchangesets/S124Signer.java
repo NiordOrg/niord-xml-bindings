@@ -10,7 +10,8 @@ import dk.dma.niord.s100.catalog._5_2.S100SEDigitalSignatureReference;
  * <p>The caller owns the key material - wire a Java keystore, BouncyCastle, an
  * HSM or a remote signing service. The {@link S124ExchangeSetFactory} forwards
  * the algorithm requested via {@code signatureAlgorithm(...)} and the exact bytes
- * to sign.</p>
+ * to sign. It is not asked for a dataset whose signature the caller hands back
+ * through {@link S124ExchangeSetFactory.Builder#reusedSignatures(java.util.Map)}.</p>
  *
  * <h2>Signature encoding</h2>
  *

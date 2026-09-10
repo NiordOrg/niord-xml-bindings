@@ -278,6 +278,43 @@ exchange sets under whichever certificate is then current. Passing the current
 certificate as the original chain is harmless: identical certificates are carried
 once, and the reused signature references the current entry.
 
+### Ship a dataset again under its original signature
+
+ECDSA is randomised: signing the same bytes twice yields two different signatures. Clause
+17-4.4.1 has the consumer match a cancellation against the signature of the dataset it
+holds, so every exchange set that ships a dataset version must carry the one signature the
+producer will later cancel it by - including a set built after the key that made it has
+been rotated out. Hand the kept signature back through `reusedSignatures(...)`, keyed by
+`S124ExchangeSetFactory.payloadHash(...)` of the dataset file bytes, together with the
+chain that made it (empty when the current certificate did):
+
+```java
+// serve the dataset again, possibly under a later certificate
+S124ExchangeSetFactory.builder()
+        .datasets(List.of(dataset))
+        .reusedSignatures(Map.of(
+                row.getSignedPayloadHash(),          // payloadHash(...) of the file bytes, kept at publish
+                                                     // time - S124Utils.marshalS124(dataset) as UTF-8 is
+                                                     // what the factory packages and signs
+                new S124ExchangeSetFactory.ReusedSignature(
+                        row.getSignature(),
+                        List.of(row.getSignatureCertificates().split("\n")))))
+        .certificatePem(currentPem)
+        .signer(currentSigner)
+        // ...
+        .build()
+        .toBytes();
+```
+
+The factory embeds the signature unchanged instead of asking the signer, and points it at
+the certificate that made it - carried under an id of the catalogue's own when it is not
+the current one, exactly as for a cancellation. A dataset whose bytes hash to no key is
+signed afresh, so a signature kept for an earlier version is never served for changed
+content; a reused value is held to the same clause 15-8.4 form as a fresh one. The
+catalogue itself is always signed by the current certificate. Passing the current
+certificate as the chain is harmless: identical certificates are carried once. New in
+0.3.2; nothing changes for callers that do not use it.
+
 ### Back-fill from an archived exchange set
 
 `S124ExchangeSetFactory.readDiscoveryMetadata(zipBytes)` returns the

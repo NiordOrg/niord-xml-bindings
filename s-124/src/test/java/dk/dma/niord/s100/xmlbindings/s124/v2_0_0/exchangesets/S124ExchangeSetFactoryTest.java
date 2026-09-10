@@ -599,6 +599,136 @@ class S124ExchangeSetFactoryTest {
     }
 
     /**
+     * A producer that ships a dataset version again ships it under the signature it published it
+     * with - clause 17-4.4.1 has the consumer match the later cancellation against that signature -
+     * even once the key that made it has been rotated out. The reused signature then references the
+     * certificate that made it, carried under an id of this catalogue's own, while the catalogue
+     * itself is signed by the current certificate.
+     */
+    @Test
+    void reusedDatasetSignatureVerifiesWithTheRotatedOutCertificateThatMadeIt() throws Exception {
+        SigningIdentityFixture a = SigningIdentityFixture.selfSigned("Data Server A");
+        SigningIdentityFixture b = SigningIdentityFixture.selfSigned("Data Server B");
+        Dataset dataset = newDataset("DK.S124.reused-rotation");
+        String datasetFile = "S100_ROOT/S-124/DATASET_FILES/" + datasetFileNameOf("DK.S124.reused-rotation");
+
+        // 1. Publish under A and keep the signature, as a producer does.
+        byte[] originalZip = publisherWith(a).datasets(List.of(dataset)).build().toBytes();
+        byte[] datasetBytes = unzip(originalZip).get(datasetFile);
+        byte[] originalSignature = dataSignatureOf(firstEntryOf(originalZip)).getValue();
+
+        // 2. Rotate to B and ship the same dataset again, handing the kept signature back.
+        byte[] zip = publisherWith(b)
+                .datasets(List.of(dataset))
+                .reusedSignatures(Map.of(S124ExchangeSetFactory.payloadHash(datasetBytes),
+                        new S124ExchangeSetFactory.ReusedSignature(originalSignature, List.of(a.certificatePem()))))
+                .build()
+                .toBytes();
+        Map<String, byte[]> entries = unzip(zip);
+        assertThat(entries.get(datasetFile)).as("the same bytes ship again").isEqualTo(datasetBytes);
+        String catalogXml = new String(entries.get("S100_ROOT/CATALOG.XML"), StandardCharsets.UTF_8);
+        assertThat(validateAgainstCatalogueSchema(catalogXml))
+                .as("XSD validation errors in CATALOG.XML:\n%s", catalogXml)
+                .isEmpty();
+
+        S100ExchangeCatalogue catalogue = catalogueOf(zip);
+        S100SESignatureOnData reused = dataSignatureOf(firstEntryOf(zip));
+        assertThat(reused.getValue()).as("the kept signature is embedded byte for byte").isEqualTo(originalSignature);
+        assertThat(reused.getCertificateRef()).isNotEqualTo("cer1");
+        X509Certificate referenced = certificateIn(catalogue.getCertificates().get(0), reused.getCertificateRef());
+        assertThat(referenced).isEqualTo(a.certificate());
+        assertThat(SigningIdentityFixture.verify(referenced.getPublicKey(), datasetBytes, reused.getValue())).isTrue();
+        assertThat(certificateIn(catalogue.getCertificates().get(0), "cer1")).isEqualTo(b.certificate());
+
+        // 3. CATALOG.SIGN is B's, over the catalogue as shipped.
+        StandaloneDigitalSignature catalogSign =
+                unmarshalSignature(new String(entries.get("S100_ROOT/CATALOG.SIGN"), StandardCharsets.UTF_8));
+        X509Certificate catalogueSigner =
+                certificateIn(catalogSign.getCertificates(), catalogSign.getDigitalSignature().getCertificateRef());
+        assertThat(catalogueSigner).isEqualTo(b.certificate());
+        assertThat(SigningIdentityFixture.verify(catalogueSigner.getPublicKey(),
+                entries.get("S100_ROOT/CATALOG.XML"), catalogSign.getDigitalSignature().getValue())).isTrue();
+    }
+
+    /** A kept signature the current certificate made references it, like a fresh one, and is embedded rather than remade. */
+    @Test
+    void reusedDatasetSignatureUnderTheCurrentCertificateReferencesIt() throws Exception {
+        SigningIdentityFixture a = SigningIdentityFixture.selfSigned("Data Server A");
+        Dataset dataset = newDataset("DK.S124.reused-current");
+        String datasetFile = "S100_ROOT/S-124/DATASET_FILES/" + datasetFileNameOf("DK.S124.reused-current");
+        byte[] originalZip = publisherWith(a).datasets(List.of(dataset)).build().toBytes();
+        byte[] datasetBytes = unzip(originalZip).get(datasetFile);
+        byte[] originalSignature = dataSignatureOf(firstEntryOf(originalZip)).getValue();
+
+        byte[] zip = publisherWith(a)
+                .datasets(List.of(dataset))
+                .reusedSignatures(Map.of(S124ExchangeSetFactory.payloadHash(datasetBytes),
+                        new S124ExchangeSetFactory.ReusedSignature(originalSignature)))
+                .build()
+                .toBytes();
+
+        S100ExchangeCatalogue catalogue = catalogueOf(zip);
+        S100SESignatureOnData reused = dataSignatureOf(firstEntryOf(zip));
+        assertThat(reused.getValue()).isEqualTo(originalSignature);
+        assertThat(reused.getCertificateRef()).isEqualTo("cer1");
+        assertThat(catalogue.getCertificates().get(0).getCertificates())
+                .extracting(S100SECertificateType::getId)
+                .containsExactly("cer1");
+    }
+
+    /**
+     * The key is the hash of the bytes actually shipped: a signature kept for an earlier version of
+     * a dataset matches nothing once the bytes have changed and the signer is asked instead, so a
+     * stale signature is never served for content it does not cover.
+     */
+    @Test
+    void reusedSignatureForOtherBytesIsIgnored() throws Exception {
+        SigningIdentityFixture a = SigningIdentityFixture.selfSigned("Data Server A");
+        byte[] zip = publisherWith(a)
+                .datasets(List.of(newDataset("DK.S124.reused-stale")))
+                .reusedSignatures(Map.of(
+                        S124ExchangeSetFactory.payloadHash("an earlier version".getBytes(StandardCharsets.UTF_8)),
+                        new S124ExchangeSetFactory.ReusedSignature(DUMMY_SIGNATURE)))
+                .build()
+                .toBytes();
+        byte[] datasetBytes = unzip(zip)
+                .get("S100_ROOT/S-124/DATASET_FILES/" + datasetFileNameOf("DK.S124.reused-stale"));
+        S100SESignatureOnData signature = dataSignatureOf(firstEntryOf(zip));
+        assertThat(signature.getValue()).isNotEqualTo(DUMMY_SIGNATURE);
+        assertThat(signature.getCertificateRef()).isEqualTo("cer1");
+        assertThat(SigningIdentityFixture.verify(a.publicKey(), datasetBytes, signature.getValue())).isTrue();
+    }
+
+    /** A kept signature is embedded as it is, so it is held to the clause 15-8.4 form a fresh one is. */
+    @Test
+    void reusedSignatureThatIsNotADerSequenceIsRejected() throws Exception {
+        SigningIdentityFixture a = SigningIdentityFixture.selfSigned("Data Server A");
+        Dataset dataset = newDataset("DK.S124.reused-raw");
+        byte[] datasetBytes = unzip(publisherWith(a).datasets(List.of(dataset)).build().toBytes())
+                .get("S100_ROOT/S-124/DATASET_FILES/" + datasetFileNameOf("DK.S124.reused-raw"));
+        S124ExchangeSetFactory factory = publisherWith(a)
+                .datasets(List.of(dataset))
+                .reusedSignatures(Map.of(S124ExchangeSetFactory.payloadHash(datasetBytes),
+                        new S124ExchangeSetFactory.ReusedSignature(new byte[96])))
+                .build();
+
+        assertThatThrownBy(factory::toBytes)
+                .isInstanceOf(S124ExchangeSetFactory.ExchangeSetException.class)
+                .hasMessageContaining(datasetFileNameOf("DK.S124.reused-raw"))
+                .hasMessageContaining("15-8.4");
+    }
+
+    /** A builder carrying the test producer's details, signing as {@code identity}. */
+    private static S124ExchangeSetFactory.Builder publisherWith(SigningIdentityFixture identity) {
+        return S124ExchangeSetFactory.builder()
+                .organization("Danish Maritime Authority")
+                .producerCode("DK00")
+                .certificatePem(identity.certificatePem())
+                .signer(identity.signer())
+                .phone("+4572196000");
+    }
+
+    /**
      * S-100 Part 15, clause 15-8.4, embeds "a Base64 ASN.1 byte sequence" of R and S. A signer
      * returning the raw r||s concatenation instead - the output of the JCA algorithm
      * "SHA384withECDSAinP1363Format" - produces signatures that verify in the producer's own
