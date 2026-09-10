@@ -278,15 +278,62 @@ exchange sets under whichever certificate is then current. Passing the current
 certificate as the original chain is harmless: identical certificates are carried
 once, and the reused signature references the current entry.
 
+### Serve a retained dataset verbatim
+
+A warning stays in force for months, and every exchange set that serves it must carry
+the one signature its cancellation will later be matched by (clause 17-4.4.1). The
+simplest way to guarantee that is to keep what the publishing build handed over and
+never marshal the dataset again: `published.bytes()` is the packaged file, the entry is
+the catalogue record, and `set.signingCertificatePems()` is the chain that signed it.
+Hand the three back as a `RetainedDataset`:
+
+```java
+// publish once: keep the bytes beside the entry and the chain
+S124ExchangeSetFactory.ExchangeSet set = factory.toExchangeSet();
+S124ExchangeSetFactory.PublishedDataset published = set.datasets().get(0);
+row.setGml(new String(published.bytes(), StandardCharsets.UTF_8));
+row.setDiscoveryMetadata(
+        S124ExchangeSetFactory.discoveryMetadataToXml(published.discoveryMetadata()));
+row.setSignatureCertificates(String.join("\n", set.signingCertificatePems()));
+
+// serve it again, any number of times, under whichever certificate is then current
+S124ExchangeSetFactory.builder()
+        .retainedDatasets(List.of(new S124ExchangeSetFactory.RetainedDataset(
+                row.getGml().getBytes(StandardCharsets.UTF_8),
+                S124ExchangeSetFactory.discoveryMetadataFromXml(row.getDiscoveryMetadata()),
+                List.of(row.getSignatureCertificates().split("\n")))))
+        .certificatePem(currentPem)
+        .signer(currentSigner)
+        // ...
+        .build()
+        .toBytes();
+```
+
+The bytes are packaged as they are, without being parsed, validated or re-marshalled.
+The entry is reproduced whole - purpose, issue date and metadata date stamp included,
+because it describes the publication the consumer already holds and is the entry a later
+cancellation reproduces - with only the signature's `certificateRef` re-labelled to the
+id this catalogue carries the certificate under. After a rotation the chain travels
+along, exactly as for a cancellation; passing the current certificate is harmless. The
+catalogue itself is always signed by the current certificate, and `set.datasets()` of the
+new build lists only the freshly published datasets, since a retained one yields no new
+record.
+
+Retained datasets are packaged after the datasets of `datasets(...)` and before any
+cancellation, and share their file-name uniqueness rule (clause 17-4.3) and the clause 9.6
+size limit. An entry whose signature was counter-signed cannot be retained this way;
+publish such a dataset afresh. New in 0.3.3.
+
 ### Ship a dataset again under its original signature
 
-ECDSA is randomised: signing the same bytes twice yields two different signatures. Clause
-17-4.4.1 has the consumer match a cancellation against the signature of the dataset it
-holds, so every exchange set that ships a dataset version must carry the one signature the
-producer will later cancel it by - including a set built after the key that made it has
-been rotated out. Hand the kept signature back through `reusedSignatures(...)`, keyed by
-`S124ExchangeSetFactory.payloadHash(...)` of the dataset file bytes, together with the
-chain that made it (empty when the current certificate did):
+A producer that keeps the typed dataset rather than the packaged bytes - and so
+re-marshals it on every build - can still serve the one signature clause 17-4.4.1 requires,
+for as long as the marshalled form stays byte-identical. Hand the kept signature back
+through `reusedSignatures(...)`, keyed by `S124ExchangeSetFactory.payloadHash(...)` of the
+dataset file bytes, together with the chain that made it (empty when the current
+certificate did). Prefer a [retained dataset](#serve-a-retained-dataset-verbatim) where the
+bytes can be kept: it needs no hash, no re-marshal and no assumption about the bindings
+version that serves it.
 
 ```java
 // serve the dataset again, possibly under a later certificate

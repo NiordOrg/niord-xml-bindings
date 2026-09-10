@@ -114,6 +114,12 @@ import jakarta.xml.bind.JAXBException;
  * has been rotated out, its chain travels along exactly as for a cancellation; see
  * {@link ReusedSignature}.</p>
  *
+ * <p>A producer that kept what it published - the file bytes, the entry and the chain, all handed
+ * over by {@link #toExchangeSet()} - ships the dataset again through
+ * {@link Builder#retainedDatasets(List)} without parsing or re-marshalling anything: the bytes
+ * are packaged verbatim, the entry is reproduced as it was published, and the signature in it
+ * references the chain that made it; see {@link RetainedDataset}.</p>
+ *
  * <p>The signer returns each signature in the form S-100 Part 15, clause 15-8.4, embeds - the
  * ASN.1 DER {@code SEQUENCE} of the ECDSA integers r and s, as {@code java.security.Signature}
  * yields for {@code "SHA384withECDSA"} - and the factory embeds it unchanged; see
@@ -315,7 +321,9 @@ public final class S124ExchangeSetFactory {
      * The call costs no more than {@link #toBytes()}: the entries handed over are the objects that
      * were marshalled into {@code CATALOG.XML}, not a re-parse of it.
      *
-     * @return the exchange set ZIP and the catalogue entry published for each dataset
+     * @return the exchange set ZIP and the catalogue entry published for each dataset of
+     *         {@link Builder#datasets(List)}; a {@link RetainedDataset} shipped again yields no
+     *         new entry, since the producer already holds the one it was published with
      * @throws ExchangeSetException     if the exchange set cannot be assembled, or the content to
      *                                  package violates a hard S-124 limit
      * @throws S124ConformanceException if a dataset breaks a rule of the S-124 product
@@ -324,7 +332,8 @@ public final class S124ExchangeSetFactory {
     public ExchangeSet toExchangeSet() {
         try {
             List<DatasetFile> datasetFiles = marshalDatasets();
-            S100ExchangeCatalogue catalogue = buildCatalogue(datasetFiles);
+            List<RetainedFile> retainedFiles = retainedFiles(datasetFiles);
+            S100ExchangeCatalogue catalogue = buildCatalogue(datasetFiles, retainedFiles);
             byte[] catalogBytes = S100ExchangeSetUtils.marshalS100ExchangeSetCatalogue(catalogue)
                     .getBytes(StandardCharsets.UTF_8);
             byte[] catalogSig = buildCatalogueSignature(catalogBytes);
@@ -338,6 +347,9 @@ public final class S124ExchangeSetFactory {
                 putDirectoryEntry(zos, SUPPORT_FILES_DIR);
                 for (DatasetFile df : datasetFiles) {
                     putFileEntry(zos, DATASET_FILES_DIR + df.fileName, df.bytes);
+                }
+                for (RetainedFile rf : retainedFiles) {
+                    putFileEntry(zos, DATASET_FILES_DIR + rf.fileName, rf.bytes);
                 }
                 putFileEntry(zos, CATALOG_XML, catalogBytes);
                 putFileEntry(zos, CATALOG_SIGN, catalogSig);
@@ -384,7 +396,7 @@ public final class S124ExchangeSetFactory {
                                 + "Part 17, clause 17-4.4.1, would later cancel by that name",
                         df.fileName, entry == null ? "nothing" : entry.getFileName()));
             }
-            result.add(new PublishedDataset(df.dataset, df.fileName, entry));
+            result.add(new PublishedDataset(df.dataset, df.fileName, df.bytes, entry));
         }
         return result;
     }
@@ -487,6 +499,12 @@ public final class S124ExchangeSetFactory {
      *                          did not change when the catalogue's spelling of it did. This is the
      *                          only place the name can be read off for a dataset that declares
      *                          neither a {@code gml:id} nor a {@code datasetFileIdentifier}
+     * @param bytes             the dataset file as packaged in the ZIP - the bytes the signature in
+     *                          {@code discoveryMetadata} covers. Handed over, not copied, like
+     *                          {@link ExchangeSet#bytes()}. A producer that keeps them beside the
+     *                          entry and the chain can ship the dataset again verbatim as a
+     *                          {@link RetainedDataset}, without unzipping anything, re-marshalling
+     *                          the dataset or hoping the marshalled form has not moved on
      * @param discoveryMetadata the object that was marshalled into {@code CATALOG.XML} for this
      *                          dataset, live and not copied. No defensive copy is made because the
      *                          catalogue has already been serialized and signed by the time the
@@ -497,11 +515,12 @@ public final class S124ExchangeSetFactory {
      *                          {@link #discoveryMetadataToXml(S100DatasetDiscoveryMetadata)}) and
      *                          pass it back as {@link Cancellation#original()}
      */
-    public record PublishedDataset(Dataset dataset, String fileName,
+    public record PublishedDataset(Dataset dataset, String fileName, byte[] bytes,
                                    S100DatasetDiscoveryMetadata discoveryMetadata) {
         public PublishedDataset {
             Objects.requireNonNull(dataset, "dataset must be set");
             Objects.requireNonNull(fileName, "fileName must be set");
+            Objects.requireNonNull(bytes, "bytes must be set");
             Objects.requireNonNull(discoveryMetadata, "discoveryMetadata must be set");
         }
     }
@@ -736,6 +755,39 @@ public final class S124ExchangeSetFactory {
                         fileName, bytes.length, MAX_DATASET_SIZE_BYTES));
             }
             result.add(new DatasetFile(fileName, bytes, dataset, uuid));
+        }
+        return result;
+    }
+
+    /**
+     * The retained datasets as the files they ship again, checked against the freshly marshalled
+     * ones for the one thing the two kinds share: S-100 Part 17, clause 17-4.3, requires all base
+     * dataset file names to be unique, whether the file was marshalled here or kept from an
+     * earlier build. The bytes themselves are packaged as they are - they were validated, signed
+     * and shipped once already, and the point of retaining them is not to parse them again - but
+     * the clause 9.6 size limit still applies to every dataset an exchange set carries.
+     */
+    private List<RetainedFile> retainedFiles(List<DatasetFile> datasetFiles) {
+        Set<String> fileNames = new LinkedHashSet<>();
+        for (DatasetFile df : datasetFiles) {
+            fileNames.add(df.fileName);
+        }
+        List<RetainedFile> result = new ArrayList<>(cfg.retainedDatasets.size());
+        for (RetainedDataset retained : cfg.retainedDatasets) {
+            String fileName = retained.fileName();
+            if (!fileNames.add(fileName)) {
+                throw new ExchangeSetException(String.format(
+                        "Two S-124 datasets would both be packaged as %s, but S-100 Part 17, clause "
+                                + "17-4.3, requires all base dataset file names to be unique; a retained "
+                                + "dataset cannot ship beside another dataset of the same name",
+                        fileName));
+            }
+            if (retained.bytes().length > MAX_DATASET_SIZE_BYTES) {
+                throw new ExchangeSetException(String.format(
+                        "S-124 dataset %s is %d bytes, exceeding the %d byte limit of S-124 clause 9.6",
+                        fileName, retained.bytes().length, MAX_DATASET_SIZE_BYTES));
+            }
+            result.add(new RetainedFile(fileName, retained.bytes(), retained));
         }
         return result;
     }
@@ -1259,9 +1311,10 @@ public final class S124ExchangeSetFactory {
 
     /**
      * Builds the exchange catalogue: the dataset entries first, in the order of
-     * {@code datasetFiles}, then one entry per fileless cancellation.
+     * {@code datasetFiles}, then the reproduced entry of each retained dataset, then one entry
+     * per fileless cancellation.
      */
-    private S100ExchangeCatalogue buildCatalogue(List<DatasetFile> datasetFiles)
+    private S100ExchangeCatalogue buildCatalogue(List<DatasetFile> datasetFiles, List<RetainedFile> retainedFiles)
             throws JAXBException, CertificateException {
         AtomicInteger signatureCounter = new AtomicInteger(1);
         // Settled below, before the certificates are handed to the catalogue builder, and read
@@ -1368,6 +1421,22 @@ public final class S124ExchangeSetFactory {
             reusedDatasetSignatures.put(hash, new ReusedDatasetSignature(
                     requireDerEcdsaSignature(reused.signature(), df.fileName), certificateRef));
         }
+        // A retained dataset ships again under the entry - and so the signature - it was
+        // published with, which references the certificate that made it. Once that certificate
+        // has been rotated out it travels along with its chain, exactly as a cancellation's does
+        // (S-100 Part 15, clause 15-8.7); under the current one the entry simply references it.
+        Map<RetainedFile, String> retainedCertificateRefs = new LinkedHashMap<>();
+        int retainedIndex = 0;
+        for (RetainedFile rf : retainedFiles) {
+            if (rf.retained.certificatePems().isEmpty()) {
+                retainedCertificateRefs.put(rf, CERTIFICATE_REF);
+                continue;
+            }
+            retainedIndex++;
+            retainedCertificateRefs.put(rf, carry(
+                    certificateChain(rf.retained.certificatePems(), "cerP" + retainedIndex, "caP" + retainedIndex + "."),
+                    certificatesById, certificateIssuers));
+        }
         catBuilder.setCertificates(certificatesById).setCertificateIssuers(certificateIssuers);
 
         for (DatasetFile df : datasetFiles) {
@@ -1450,6 +1519,20 @@ public final class S124ExchangeSetFactory {
                     // (see s124Profile).
                     .setDigitalSignatureReference(cfg.signatureAlgorithm)
                     .build(df.bytes)));
+        }
+
+        // Retained datasets: the entry each was published with, reproduced whole - purpose,
+        // issue date, metadata date stamp and all - because it is the record the consumer
+        // already holds and the one a later cancellation will reproduce (clause 17-4.4.1); only
+        // the signature's certificate reference is re-labelled to the id this catalogue carries
+        // the certificate under. Nothing is derived from the bytes: they are not parsed.
+        for (RetainedFile rf : retainedFiles) {
+            S100DatasetDiscoveryMetadata entry = copyOf(rf.retained.entry());
+            List<S100DatasetDiscoveryMetadata.DigitalSignatureValue> signatures = withCertificateRef(
+                    entry.getDigitalSignatureValues(), retainedCertificateRefs.get(rf), Map.of());
+            entry.getDigitalSignatureValues().clear();
+            entry.getDigitalSignatureValues().addAll(signatures);
+            catBuilder.addDatasetMetadata(builder -> entry);
         }
 
         // Fileless cancellations (S-100 Part 17, clause 17-4.4.1): a discovery-metadata entry
@@ -1831,6 +1914,79 @@ public final class S124ExchangeSetFactory {
 
     private record DatasetFile(String fileName, byte[] bytes, Dataset dataset, String uuid) {}
 
+    /** A retained dataset as it is packaged: under the bare file name its entry announces it by. */
+    private record RetainedFile(String fileName, byte[] bytes, RetainedDataset retained) {}
+
+    /**
+     * A dataset as the producer kept it after publishing, shipped again exactly as it was: the
+     * file bytes, the catalogue entry that published them and the chain that signed them - the
+     * three things {@link #toExchangeSet()} hands over, as {@link PublishedDataset#bytes()},
+     * {@link PublishedDataset#discoveryMetadata()} and {@link ExchangeSet#signingCertificatePems()}.
+     * <p/>
+     * A producer serving a warning that stays in force for months serves the same dataset over and
+     * over, and clause 17-4.4.1 obliges it to serve the same signature every time, since that
+     * signature is what a consumer matches the eventual cancellation by. Re-marshalling the typed
+     * dataset on every build and handing the kept signature back through {@link ReusedSignature}
+     * achieves that only for as long as the marshalled form stays byte-identical; retaining the
+     * bytes achieves it by construction, and costs neither a parse nor a marshal per build. The
+     * bytes are packaged verbatim and the entry reproduced whole - purpose, issue date and metadata
+     * date stamp included, because they describe the publication the consumer already holds -
+     * while the signature in it is re-labelled to reference the certificate under the id this
+     * catalogue carries it by, precisely as a {@link Cancellation} reproduces the same entry later.
+     * <p/>
+     * The bytes are not parsed, validated or checked against the entry: they were all of that when
+     * they were published, and a record that has been tampered with since is the producer's to
+     * guard. Only the clause 9.6 size limit and the clause 17-4.3 uniqueness of file names, which
+     * hold for every dataset of an exchange set, are applied. An entry whose signature was
+     * counter-signed (clause 15-8.8) is rejected, since the counter-signer's chain cannot be
+     * supplied here; publish such a dataset afresh instead.
+     *
+     * @param bytes           the dataset file as it was packaged when published, which the entry's
+     *                        signature covers; copied
+     * @param entry           the entry that published it, as {@link PublishedDataset#discoveryMetadata()}
+     *                        handed it over or {@link #discoveryMetadataFromXml(String)} reads it back;
+     *                        copied before it is reproduced, never modified
+     * @param certificatePems the chain that verifies the entry's signature, signing certificate
+     *                        first; empty means the exchange set's current Data Server certificate
+     *                        made it
+     */
+    public record RetainedDataset(byte[] bytes, S100DatasetDiscoveryMetadata entry, List<String> certificatePems) {
+
+        /** A retained dataset whose entry the current Data Server certificate signed. */
+        public RetainedDataset(byte[] bytes, S100DatasetDiscoveryMetadata entry) {
+            this(bytes, entry, List.of());
+        }
+
+        public RetainedDataset {
+            Objects.requireNonNull(bytes, "retained dataset bytes must be set");
+            Objects.requireNonNull(entry, "retained dataset entry must be set");
+            if (bytes.length == 0) {
+                throw new IllegalArgumentException("retained dataset bytes must not be empty");
+            }
+            if (entry.getFileName() == null || entry.getFileName().isBlank()
+                    || bareFileName(entry.getFileName()).isEmpty()) {
+                throw new IllegalArgumentException("retained dataset entry must carry the file name "
+                        + "the dataset was published under (S-100 Part 17, clause 17-4.3)");
+            }
+            if (entry.getDigitalSignatureValues().isEmpty()) {
+                throw new IllegalArgumentException("retained dataset entry must carry the dataset's "
+                        + "digital signature (S-100 Part 17, clause 17-4.4.1: the signature published "
+                        + "with a dataset is what its cancellation is later matched by)");
+            }
+            bytes = bytes.clone();
+            certificatePems = certificatePems == null ? List.of() : List.copyOf(certificatePems);
+        }
+
+        /**
+         * The bare clause 17-4.3 name the entry announces the dataset under, and so the name it
+         * is packaged as again: the last path segment of the entry's {@code xs:anyURI} value,
+         * without a scheme - the same string {@link PublishedDataset#fileName()} carries.
+         */
+        public String fileName() {
+            return bareFileName(entry.getFileName());
+        }
+    }
+
     /**
      * A fileless dataset cancellation (S-100 Part 17, clause 17-4.4.1): a discovery-metadata
      * entry that withdraws a previously published dataset without shipping a file.
@@ -1929,6 +2085,7 @@ public final class S124ExchangeSetFactory {
     public static final class Builder {
         private List<Dataset> datasets = Collections.emptyList();
         private List<Cancellation> cancellations = Collections.emptyList();
+        private List<RetainedDataset> retainedDatasets = Collections.emptyList();
         private String organization;
         private String producerCode;
         private String certificatePem;
@@ -1985,6 +2142,7 @@ public final class S124ExchangeSetFactory {
         private Builder(Builder other) {
             this.datasets = copyOfNullable(other.datasets);
             this.cancellations = copyOfNullable(other.cancellations);
+            this.retainedDatasets = copyOfNullable(other.retainedDatasets);
             this.organization = other.organization;
             this.producerCode = other.producerCode;
             this.certificatePem = other.certificatePem;
@@ -2034,6 +2192,15 @@ public final class S124ExchangeSetFactory {
         public Builder datasets(List<Dataset> datasets) { this.datasets = datasets; return this; }
         /** Fileless dataset cancellations (S-100 Part 17, clause 17-4.4.1); see {@link Cancellation}. */
         public Builder cancellations(List<Cancellation> cancellations) { this.cancellations = cancellations; return this; }
+        /**
+         * Datasets published earlier and shipped again verbatim, from what the producer retained
+         * of the publication; see {@link RetainedDataset}. They are packaged after the datasets
+         * of {@link #datasets(List)} and catalogued in the same order, before any cancellation.
+         */
+        public Builder retainedDatasets(List<RetainedDataset> retainedDatasets) {
+            this.retainedDatasets = retainedDatasets;
+            return this;
+        }
         public Builder organization(String organization) { this.organization = organization; return this; }
         public Builder producerCode(String producerCode) { this.producerCode = producerCode; return this; }
         public Builder certificatePem(String certificatePem) { this.certificatePem = certificatePem; return this; }
@@ -2174,8 +2341,9 @@ public final class S124ExchangeSetFactory {
         public S124ExchangeSetFactory build() {
             Objects.requireNonNull(datasets, "datasets must be set");
             Objects.requireNonNull(cancellations, "cancellations must be set");
-            if (datasets.isEmpty() && cancellations.isEmpty()) {
-                throw new IllegalArgumentException("at least one dataset or cancellation must be provided");
+            Objects.requireNonNull(retainedDatasets, "retainedDatasets must be set");
+            if (datasets.isEmpty() && retainedDatasets.isEmpty() && cancellations.isEmpty()) {
+                throw new IllegalArgumentException("at least one dataset, retained dataset or cancellation must be provided");
             }
             Objects.requireNonNull(organization, "organization must be set");
             Objects.requireNonNull(producerCode, "producerCode must be set");

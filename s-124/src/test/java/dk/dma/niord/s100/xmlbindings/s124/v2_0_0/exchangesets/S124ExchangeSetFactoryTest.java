@@ -718,6 +718,182 @@ class S124ExchangeSetFactoryTest {
                 .hasMessageContaining("15-8.4");
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Retained datasets: shipped again verbatim from what the producer kept of the publication
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * The producer flow the record exists for: publish once, keep the three things the build hands
+     * over - bytes, entry, chain - and serve the dataset again from those alone, after the key
+     * that signed it has been rotated out. The file ships byte for byte, the entry is the one
+     * that was published (purpose, issue date and date stamp included), and its signature
+     * references the rotated-out certificate, carried with the exchange set and verifiable.
+     */
+    @Test
+    void retainedDatasetShipsVerbatimUnderThePublishedEntryAcrossARotation() throws Exception {
+        SigningIdentityFixture a = SigningIdentityFixture.selfSigned("Data Server A");
+        SigningIdentityFixture b = SigningIdentityFixture.selfSigned("Data Server B");
+        String datasetFile = "S100_ROOT/S-124/DATASET_FILES/" + datasetFileNameOf("DK.S124.retained-rotation");
+
+        // 1. Publish under A and keep what the build hands over, as a producer's row holds it.
+        S124ExchangeSetFactory.ExchangeSet published = publisherWith(a)
+                .datasets(List.of(newDataset("DK.S124.retained-rotation")))
+                .build()
+                .toExchangeSet();
+        S124ExchangeSetFactory.PublishedDataset row = published.datasets().get(0);
+        assertThat(row.bytes()).as("the bytes handed over are the packaged file")
+                .isEqualTo(unzip(published.bytes()).get(datasetFile));
+        String storedEntry = S124ExchangeSetFactory.discoveryMetadataToXml(row.discoveryMetadata());
+        List<String> storedChain = published.signingCertificatePems();
+
+        // 2. Rotate to B and ship the dataset again from the row, beside a fresh dataset.
+        S124ExchangeSetFactory.ExchangeSet set = publisherWith(b)
+                .datasets(List.of(newDataset("DK.S124.retained-fresh")))
+                .retainedDatasets(List.of(new S124ExchangeSetFactory.RetainedDataset(
+                        row.bytes(), S124ExchangeSetFactory.discoveryMetadataFromXml(storedEntry), storedChain)))
+                .build()
+                .toExchangeSet();
+        Map<String, byte[]> entries = unzip(set.bytes());
+        assertThat(entries.get(datasetFile)).as("the retained bytes ship verbatim").isEqualTo(row.bytes());
+        assertThat(datasetFileCount(entries)).isEqualTo(2);
+        assertThat(set.datasets()).as("a retained dataset yields no new record; the fresh one does").hasSize(1);
+        assertThat(set.datasets().get(0).fileName()).isEqualTo(datasetFileNameOf("DK.S124.retained-fresh"));
+        String catalogXml = new String(entries.get("S100_ROOT/CATALOG.XML"), StandardCharsets.UTF_8);
+        assertThat(validateAgainstCatalogueSchema(catalogXml))
+                .as("XSD validation errors in CATALOG.XML:\n%s", catalogXml)
+                .isEmpty();
+
+        // 3. The catalogue: the fresh entry first, then the reproduced one.
+        S100ExchangeCatalogue catalogue = catalogueOf(set.bytes());
+        List<S100DatasetDiscoveryMetadata> catalogued =
+                catalogue.getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas();
+        assertThat(catalogued).hasSize(2);
+        assertThat(catalogued.get(0).getFileName())
+                .isEqualTo("file:/S-124/DATASET_FILES/" + datasetFileNameOf("DK.S124.retained-fresh"));
+        S100DatasetDiscoveryMetadata reproduced = catalogued.get(1);
+        assertThat(reproduced.getPurpose()).isEqualTo(S100Purpose.NEW_DATASET);
+        assertThat(reproduced.getIssueDate()).isEqualTo(row.discoveryMetadata().getIssueDate());
+        assertThat(reproduced.getMetadataDateStamp()).isEqualTo(row.discoveryMetadata().getMetadataDateStamp());
+        assertThat(withoutSignature(marshal(reproduced)))
+                .as("the entry is the published one, not one rebuilt from the current configuration")
+                .isEqualTo(withoutSignature(marshal(S124ExchangeSetFactory.discoveryMetadataFromXml(storedEntry))));
+
+        // 4. Its signature is A's, references A's certificate under an id of this catalogue, and verifies.
+        S100SESignatureOnData reused = dataSignatureOf(reproduced);
+        assertThat(reused.getValue()).isEqualTo(dataSignatureOf(row.discoveryMetadata()).getValue());
+        assertThat(reused.getCertificateRef()).isNotEqualTo("cer1");
+        X509Certificate referenced = certificateIn(catalogue.getCertificates().get(0), reused.getCertificateRef());
+        assertThat(referenced).isEqualTo(a.certificate());
+        assertThat(SigningIdentityFixture.verify(referenced.getPublicKey(), row.bytes(), reused.getValue())).isTrue();
+        assertThat(certificateIn(catalogue.getCertificates().get(0), "cer1")).isEqualTo(b.certificate());
+
+        // 5. CATALOG.SIGN is B's, over the catalogue as shipped.
+        StandaloneDigitalSignature catalogSign =
+                unmarshalSignature(new String(entries.get("S100_ROOT/CATALOG.SIGN"), StandardCharsets.UTF_8));
+        X509Certificate catalogueSigner =
+                certificateIn(catalogSign.getCertificates(), catalogSign.getDigitalSignature().getCertificateRef());
+        assertThat(catalogueSigner).isEqualTo(b.certificate());
+        assertThat(SigningIdentityFixture.verify(catalogueSigner.getPublicKey(),
+                entries.get("S100_ROOT/CATALOG.XML"), catalogSign.getDigitalSignature().getValue())).isTrue();
+    }
+
+    /** Under the certificate that made it, the reproduced entry references it like a fresh one would. */
+    @Test
+    void retainedDatasetUnderTheCurrentCertificateReferencesIt() throws Exception {
+        SigningIdentityFixture a = SigningIdentityFixture.selfSigned("Data Server A");
+        S124ExchangeSetFactory.PublishedDataset row = publisherWith(a)
+                .datasets(List.of(newDataset("DK.S124.retained-current")))
+                .build()
+                .toExchangeSet()
+                .datasets()
+                .get(0);
+
+        byte[] zip = publisherWith(a)
+                .retainedDatasets(List.of(new S124ExchangeSetFactory.RetainedDataset(
+                        row.bytes(), row.discoveryMetadata())))
+                .build()
+                .toBytes();
+
+        S100ExchangeCatalogue catalogue = catalogueOf(zip);
+        S100SESignatureOnData reused = dataSignatureOf(firstEntryOf(zip));
+        assertThat(reused.getValue()).isEqualTo(dataSignatureOf(row.discoveryMetadata()).getValue());
+        assertThat(reused.getCertificateRef()).isEqualTo("cer1");
+        assertThat(catalogue.getCertificates().get(0).getCertificates())
+                .extracting(S100SECertificateType::getId)
+                .containsExactly("cer1");
+        assertThat(datasetFileCount(unzip(zip))).isEqualTo(1);
+    }
+
+    /** A retained dataset is packaged under the name its entry announces, so it cannot share it with a fresh one. */
+    @Test
+    void retainedDatasetSharingAFileNameWithAFreshDatasetIsRejected() throws Exception {
+        S124ExchangeSetFactory.PublishedDataset row = publisher()
+                .datasets(List.of(newDataset("DK.S124.retained-clash")))
+                .build()
+                .toExchangeSet()
+                .datasets()
+                .get(0);
+        S124ExchangeSetFactory factory = publisher()
+                .datasets(List.of(newDataset("DK.S124.retained-clash")))
+                .retainedDatasets(List.of(new S124ExchangeSetFactory.RetainedDataset(
+                        row.bytes(), row.discoveryMetadata())))
+                .build();
+
+        assertThatThrownBy(factory::toBytes)
+                .isInstanceOf(S124ExchangeSetFactory.ExchangeSetException.class)
+                .hasMessageContaining(datasetFileNameOf("DK.S124.retained-clash"))
+                .hasMessageContaining("17-4.3");
+    }
+
+    /** The record is only usable with what the build handed over: a named, signed entry and the bytes. */
+    @Test
+    void retainedDatasetRequiresBytesAndAPublishedEntry() throws Exception {
+        S100DatasetDiscoveryMetadata entry = publisher()
+                .datasets(List.of(newDataset("DK.S124.retained-invalid")))
+                .build()
+                .toExchangeSet()
+                .datasets()
+                .get(0)
+                .discoveryMetadata();
+
+        assertThatThrownBy(() -> new S124ExchangeSetFactory.RetainedDataset(new byte[0], entry))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("bytes");
+        S100DatasetDiscoveryMetadata unsigned = S124ExchangeSetFactory.discoveryMetadataFromXml(
+                S124ExchangeSetFactory.discoveryMetadataToXml(entry));
+        unsigned.getDigitalSignatureValues().clear();
+        assertThatThrownBy(() -> new S124ExchangeSetFactory.RetainedDataset(new byte[] {1}, unsigned))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("signature");
+        S100DatasetDiscoveryMetadata unnamed = S124ExchangeSetFactory.discoveryMetadataFromXml(
+                S124ExchangeSetFactory.discoveryMetadataToXml(entry));
+        unnamed.setFileName("file:/S-124/DATASET_FILES/");
+        assertThatThrownBy(() -> new S124ExchangeSetFactory.RetainedDataset(new byte[] {1}, unnamed))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("file name");
+    }
+
+    /** A retained dataset alone is a complete exchange set, the way a cancellation alone is. */
+    @Test
+    void retainedDatasetOnlyExchangeSetBuilds() throws Exception {
+        S124ExchangeSetFactory.PublishedDataset row = publisher()
+                .datasets(List.of(newDataset("DK.S124.retained-only")))
+                .build()
+                .toExchangeSet()
+                .datasets()
+                .get(0);
+        S124ExchangeSetFactory.ExchangeSet set = publisher()
+                .retainedDatasets(List.of(new S124ExchangeSetFactory.RetainedDataset(
+                        row.bytes(), row.discoveryMetadata())))
+                .build()
+                .toExchangeSet();
+
+        assertThat(set.datasets()).isEmpty();
+        assertThat(datasetFileCount(unzip(set.bytes()))).isEqualTo(1);
+        assertThat(firstEntryOf(set.bytes()).getFileName())
+                .isEqualTo("file:/S-124/DATASET_FILES/" + row.fileName());
+    }
+
     /** A builder carrying the test producer's details, signing as {@code identity}. */
     private static S124ExchangeSetFactory.Builder publisherWith(SigningIdentityFixture identity) {
         return S124ExchangeSetFactory.builder()
@@ -2095,7 +2271,7 @@ class S124ExchangeSetFactoryTest {
 
         assertThatThrownBy(b::build)
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("at least one dataset or cancellation");
+                .hasMessageContaining("at least one dataset");
     }
 
     // ---------------------------------------------------------------------------------------
