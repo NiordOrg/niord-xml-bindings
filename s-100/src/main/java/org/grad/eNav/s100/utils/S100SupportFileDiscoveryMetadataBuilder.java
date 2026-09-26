@@ -317,7 +317,7 @@ public class S100SupportFileDiscoveryMetadataBuilder {
 
             // And add it to the metadata
             final S100SupportFileDiscoveryMetadata.DigitalSignatureValue digitalSignatureValue = new S100SupportFileDiscoveryMetadata.DigitalSignatureValue();
-            digitalSignatureValue.setS100SEDigitalSignature(this.objectFactory.createS100SEDigitalSignature(signature));
+            digitalSignatureValue.setS100SEDigitalSignature(S100ExchangeSetUtils.digitalSignatureElement(signature));
             metadata.getDigitalSignatureValues().add(digitalSignatureValue);
         }
         // Or use the existing signatures if provided

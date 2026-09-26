@@ -211,11 +211,17 @@ It writes to `target/danish-nw-examples/`:
 | `README.md` | Warning descriptions and the signing setup used |
 | `datasets/` | Six warning datasets and one in-force bulletin |
 | `exchange-sets/` | A ZIP per dataset, a combined ZIP and its extracted contents |
+| `fileless-cancellation/` | Self-contained hand-over folder: the original exchange set, the retained catalogue entry and the cancelling exchange set, with its own README |
 | `signing/` | Temporary signing material |
 
 The scenarios cover an unlit buoy, cable work, drifting containers, a firing
 exercise, an unlit turbine and a bridge closure. They demonstrate points, curves,
-surfaces, English/Danish text and references to warnings in force.
+surfaces, English/Danish text and references to warnings in force. The unlit buoy
+is then cancelled the way S-124 clause 9.3 prescribes: a cancellation dataset
+plus a fileless cancellation (S-100 Part 17, clause 17-4.4.1) in one exchange
+set, built from the catalogue entry retained at publish time. That example is
+written to `fileless-cancellation/`, a folder that stands on its own and whose
+README walks through the three steps.
 
 Each dataset and each catalogue is XSD-validated before being written. The
 generator creates a temporary P-384 key and self-signed certificate in the JVM and

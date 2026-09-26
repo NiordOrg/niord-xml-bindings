@@ -27,6 +27,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -69,9 +70,14 @@ import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.MessageSeriesIdentifierType;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.NavwarnAreaAffected;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.NavwarnPart;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.NavwarnPreamble;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ReferenceCategoryLabel;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ReferenceCategoryType;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.References;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.TextPlacement;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.util.GeometryS124Converter;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.util.S124CodedValues;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.util.S124ConformanceException;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.util.S124DatasetValidator;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.util.S124Utils;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.util.S124XsdValidator;
 import jakarta.xml.bind.JAXBException;
@@ -128,6 +134,22 @@ import jakarta.xml.bind.JAXBException;
  * that reproduces the cancelled dataset's file name, its <em>original</em> digital signature
  * and all other mandatory metadata, but ships no dataset file. Consumers use it to remove the
  * referenced dataset. See {@link Cancellation}.</p>
+ *
+ * <p>In S-124 a fileless cancellation never travels alone. Clause 9.3 lists the ways an S-124
+ * dataset is cancelled, and the two a producer initiates both pair the fileless cancellation with
+ * a <em>cancellation dataset</em> in the same exchange set: a new, numbered message carrying a
+ * {@code References} of referenceCategory 1 (warning cancellation) whose
+ * {@code messageSeriesIdentifier} names the message being withdrawn - "as well as including a
+ * fileless cancellation (see S-100 Part 17, clause 17-4.4.1) of the dataset being cancelled".
+ * The factory enforces that pairing in both directions before it packages anything: every
+ * cancellation must be named by such a References in a packaged dataset, and every such
+ * References must be matched by a cancellation, with one declared exception - a message that was
+ * never published as an S-124 dataset has no dataset to withdraw, and is listed with
+ * {@link Builder#messagesWithoutDataset(List)}. The pairing key is the Marine Resource Name that
+ * clause 12.2.2 has the catalogue's {@code datasetID} and the message's
+ * {@code interoperabilityIdentifier} share. A new in-force bulletin is not paired with anything:
+ * Table 8-1 has it supersede the previous bulletin by type, not by cancellation, so the previous
+ * bulletin's file is not withdrawn filelessly either.</p>
  *
  * <p>The dataset entries follow the S-124 clause 12.2.2 profile of
  * {@code S100_DatasetDiscoveryMetadata}, which clause 12.1 restricts "to remove attributes that
@@ -313,6 +335,7 @@ public final class S124ExchangeSetFactory {
      */
     public ExchangeSet toExchangeSet() {
         try {
+            checkCancellationPairing();
             List<DatasetFile> datasetFiles = marshalDatasets();
             S100ExchangeCatalogue catalogue = buildCatalogue(datasetFiles);
             byte[] catalogBytes = S100ExchangeSetUtils.marshalS100ExchangeSetCatalogue(catalogue)
@@ -1017,10 +1040,27 @@ public final class S124ExchangeSetFactory {
      */
     private static List<S100DatasetDiscoveryMetadata.DigitalSignatureValue> withCertificateRef(
             List<S100DatasetDiscoveryMetadata.DigitalSignatureValue> values, String certificateRef,
-            Map<String, String> counterSignerRefs) {
+            Map<String, String> counterSignerRefs, java.util.function.Supplier<String> newIds) {
         ObjectFactory objectFactory = new ObjectFactory();
-        List<S100DatasetDiscoveryMetadata.DigitalSignatureValue> result = new ArrayList<>(values.size());
+        // Every signature of the entry gets an id of this catalogue's own before any is copied,
+        // so that a chained signature's signatureRef - which S-100 Part 15, clause 15-8.8,
+        // resolves by id - can be translated to the new id of the signature it counter-signs,
+        // whichever order the two appear in.
+        Map<String, String> idsByOriginal = new LinkedHashMap<>();
+        List<String> ids = new ArrayList<>(values.size());
         for (S100DatasetDiscoveryMetadata.DigitalSignatureValue value : values) {
+            S100SEDigitalSignature original = value.getS100SEDigitalSignature() == null
+                    ? null
+                    : value.getS100SEDigitalSignature().getValue();
+            String id = original == null ? null : newIds.get();
+            ids.add(id);
+            if (original != null && original.getId() != null && !original.getId().isBlank()) {
+                idsByOriginal.putIfAbsent(original.getId(), id);
+            }
+        }
+        List<S100DatasetDiscoveryMetadata.DigitalSignatureValue> result = new ArrayList<>(values.size());
+        for (int i = 0; i < values.size(); i++) {
+            S100DatasetDiscoveryMetadata.DigitalSignatureValue value = values.get(i);
             S100SEDigitalSignature original = value.getS100SEDigitalSignature() == null
                     ? null
                     : value.getS100SEDigitalSignature().getValue();
@@ -1028,11 +1068,12 @@ public final class S124ExchangeSetFactory {
                 result.add(value);
                 continue;
             }
+            String id = ids.get(i);
             S100DatasetDiscoveryMetadata.DigitalSignatureValue copy =
                     new S100DatasetDiscoveryMetadata.DigitalSignatureValue();
             if (original instanceof S100SESignatureOnData onData) {
                 S100SESignatureOnData signature = new S100SESignatureOnData();
-                signature.setId(onData.getId());
+                signature.setId(id);
                 signature.setValue(onData.getValue());
                 signature.setDataStatus(onData.getDataStatus());
                 signature.setCertificateRef(certificateRef);
@@ -1072,17 +1113,28 @@ public final class S124ExchangeSetFactory {
                             onSignature.getId(), onSignature.getSignatureRef(),
                             onSignature.getCertificateRef(), onSignature.getCertificateRef()));
                 }
+                String signatureRef = idsByOriginal.get(onSignature.getSignatureRef());
+                if (signatureRef == null) {
+                    throw new ExchangeSetException(String.format(
+                            "The reused signature %s of the cancelled dataset counter-signs "
+                                    + "signature \"%s\", which the entry does not carry; S-100 Part "
+                                    + "15, clause 15-8.8, chains signatures by signatureRef within "
+                                    + "the entry, so a reference to a signature outside it could "
+                                    + "not be verified from the exchange set",
+                            onSignature.getId(), onSignature.getSignatureRef()));
+                }
                 S100SESignatureOnSignature signature = new S100SESignatureOnSignature();
-                signature.setId(onSignature.getId());
+                signature.setId(id);
                 signature.setValue(onSignature.getValue());
-                signature.setSignatureRef(onSignature.getSignatureRef());
+                // The chain is kept: it now points at the new id of the signature it counter-signs.
+                signature.setSignatureRef(signatureRef);
                 // Not the data signer's certificate: the counter-signer is a different certified
                 // identity, carried under an id of this catalogue's own.
                 signature.setCertificateRef(counterSignerRef);
                 copy.setS100SEDigitalSignature(objectFactory.createS100SESignatureOnSignature(signature));
             } else {
                 S100SEDigitalSignature signature = new S100SEDigitalSignature();
-                signature.setId(original.getId());
+                signature.setId(id);
                 signature.setValue(original.getValue());
                 signature.setCertificateRef(certificateRef);
                 copy.setS100SEDigitalSignature(objectFactory.createS100SEDigitalSignature(signature));
@@ -1380,6 +1432,17 @@ public final class S124ExchangeSetFactory {
         // with purpose=cancellation that reuses the cancelled dataset's file name, original
         // digital signature and mandatory metadata, but WITHOUT shipping a dataset file. The
         // build(null) call reuses the supplied original signature instead of signing a payload.
+        //
+        // The reused signatures get ids of this catalogue's own - sigC1, sigC2, ... - like the
+        // certificates carried for them get cerC1, cerC2, .... The dataset entries above number
+        // theirs sig1, sig2, ... from one, and so did the catalogue each original came from, so a
+        // reproduced id would collide with a new entry's in exactly the S-124 clause 9.3 case: a
+        // cancellation dataset delivered together with the fileless cancellation. The id is a
+        // catalogue-local label that S-100 Part 15, clause 15-8.8, resolves a signatureRef by,
+        // not part of what clause 17-4.4.1 has the entry reproduce, which is the signature.
+        AtomicInteger reusedSignatureCounter = new AtomicInteger();
+        java.util.function.Supplier<String> reusedSignatureIds =
+                () -> "sigC" + reusedSignatureCounter.incrementAndGet();
         for (Cancellation cancellation : cfg.cancellations) {
             // Clause 17-4.4.1 requires every other mandatory field to keep the value it had in
             // the original, so the original entry is reproduced rather than rebuilt from the
@@ -1392,9 +1455,13 @@ public final class S124ExchangeSetFactory {
             S100DatasetDiscoveryMetadata entry = copyOf(cancellation.original());
             entry.setPurpose(S100Purpose.CANCELLATION);
             entry.setIssueDate(cancellation.issueDate());
+            // The time of day qualifies the issue date, so it follows it (S-124 clause 12.2.2:
+            // "Time of day at which the data was made available"): the original's would pair
+            // with the new date to name an instant at which nothing happened.
+            entry.setIssueTime(cancellation.issueTime());
             List<S100DatasetDiscoveryMetadata.DigitalSignatureValue> signatures = withCertificateRef(
                     entry.getDigitalSignatureValues(), cancellationCertificateRefs.get(cancellation),
-                    counterSignerRefs.get(cancellation));
+                    counterSignerRefs.get(cancellation), reusedSignatureIds);
             entry.getDigitalSignatureValues().clear();
             entry.getDigitalSignatureValues().addAll(signatures);
             catBuilder.addDatasetMetadata(builder -> entry);
@@ -1602,6 +1669,159 @@ public final class S124ExchangeSetFactory {
     }
 
     /**
+     * Enforces, in both directions, the pairing S-124 clause 9.3 imposes on a fileless
+     * cancellation - before anything is marshalled or signed.
+     * <p/>
+     * Clause 9.3 lists four ways an S-124 dataset may be cancelled. Two are passive: an expiry
+     * date that passes, and absence from the most recent in-force bulletin, which clause 8.1.3
+     * reserves as a fail safe ("the in-force bulletin must not be used by a producer to cancel
+     * valid datasets"). The two a producer initiates are alike - a cancellation dataset "which
+     * contains only one instance of a References information type with the referenceType
+     * attribute set to 1 (cancellation), and the messageReference with the identifier(s) of the
+     * dataset(s) to be cancelled", or a new dataset with updated information and such a
+     * References - and each is sent "as well as including a fileless cancellation (see S-100
+     * Part 17, clause 17-4.4.1) of the dataset being cancelled". A fileless cancellation without
+     * the References removes a warning from the bridge with no cancellation message for the user
+     * to review (clause 11.1.3); a References without the fileless cancellation leaves the
+     * withdrawn dataset loaded, since clause 9.2 keeps every dataset valid until cancelled.
+     * Neither is one of the four ways, and a cancellation-only exchange set, valid S-100 Part
+     * 17 though it is, is the first of them writ large.
+     * <p/>
+     * The pairing key is the Marine Resource Name of clause 12.2.2, which the catalogue's
+     * {@code datasetID} and the message's {@code interoperabilityIdentifier} must share. A
+     * References that names a message by its series fields alone cannot be paired, and nor can
+     * a cancelled entry without a {@code datasetID} - the factory omits one for a dataset that
+     * declared a non-MRN interoperabilityIdentifier; both are reported rather than guessed at.
+     * The one legitimate unmatched References is to a message that was never published as an
+     * S-124 dataset, which {@link Builder#messagesWithoutDataset(List)} declares.
+     */
+    private void checkCancellationPairing() {
+        final String clause = "S-124 clause 9.3";
+        List<S124DatasetValidator.Violation> violations = new ArrayList<>();
+
+        // What the packaged datasets say they cancel, keyed by MRN.
+        Map<String, String> referenced = new LinkedHashMap<>();
+        for (Dataset dataset : cfg.datasets) {
+            for (AbstractGMLType member : members(dataset)) {
+                if (member instanceof References references && isWarningCancellation(references)) {
+                    for (MessageSeriesIdentifierType series : references.getMessageSeriesIdentifiers()) {
+                        referenced.putIfAbsent(messageKey(series), describe(series));
+                    }
+                }
+            }
+        }
+        Set<String> withoutDataset = new LinkedHashSet<>();
+        for (MessageSeriesIdentifierType series : cfg.messagesWithoutDataset) {
+            withoutDataset.add(messageKey(series));
+        }
+
+        if (cfg.datasets.isEmpty() && !cfg.cancellations.isEmpty()) {
+            violations.add(new S124DatasetValidator.Violation(clause, String.format(
+                    "the exchange set carries %d fileless cancellation(s) and no dataset. S-124 "
+                            + "cancels a dataset by a cancellation dataset - a message whose "
+                            + "References has referenceCategory 1 (warning cancellation) and names "
+                            + "the message withdrawn - delivered together with the fileless "
+                            + "cancellation, never by the fileless cancellation alone; package the "
+                            + "cancellation message as a dataset in the same exchange set",
+                    cfg.cancellations.size())));
+        } else {
+            Set<String> cancelled = new LinkedHashSet<>();
+            for (Cancellation cancellation : cfg.cancellations) {
+                String fileName = cancellation.original().getFileName();
+                String datasetId = cancellation.original().getDatasetID();
+                if (datasetId == null || datasetId.isBlank()) {
+                    violations.add(new S124DatasetValidator.Violation(clause, String.format(
+                            "the fileless cancellation of %s carries no datasetID, so no References "
+                                    + "can name the dataset it withdraws: S-124 clause 12.2.2 pairs "
+                                    + "the two by the Marine Resource Name the catalogue's datasetID "
+                                    + "and the message's interoperabilityIdentifier share, and the "
+                                    + "dataset was published without one",
+                            fileName)));
+                    continue;
+                }
+                cancelled.add(datasetId);
+                if (!referenced.containsKey(datasetId)) {
+                    violations.add(new S124DatasetValidator.Violation(clause, String.format(
+                            "the fileless cancellation of %s (datasetID %s) is named by no packaged "
+                                    + "dataset: no References of referenceCategory 1 (warning "
+                                    + "cancellation) carries a messageSeriesIdentifier whose "
+                                    + "interoperabilityIdentifier is that MRN. Package the "
+                                    + "cancellation message in this exchange set, with the withdrawn "
+                                    + "message's MRN in its References",
+                            fileName, datasetId)));
+                }
+            }
+            for (Map.Entry<String, String> reference : referenced.entrySet()) {
+                if (cancelled.contains(reference.getKey()) || withoutDataset.contains(reference.getKey())) {
+                    continue;
+                }
+                violations.add(new S124DatasetValidator.Violation(clause, String.format(
+                        "a packaged dataset cancels %s with a References of referenceCategory 1 "
+                                + "(warning cancellation), but the exchange set carries no fileless "
+                                + "cancellation of that message's dataset, which stays loaded until "
+                                + "one arrives. Add the Cancellation built from the entry retained "
+                                + "when the message was published - or, if it was never published as "
+                                + "an S-124 dataset, declare it with messagesWithoutDataset(...)",
+                        reference.getValue())));
+            }
+        }
+
+        if (!violations.isEmpty()) {
+            String detail = violations.stream()
+                    .map(v -> String.format("%n  - [%s] %s", v.clause(), v.message()))
+                    .collect(Collectors.joining());
+            throw new S124ConformanceException(
+                    "The exchange set does not cancel datasets the way S-124 clause 9.3 requires:" + detail,
+                    violations);
+        }
+    }
+
+    /** Whether a References is a warning cancellation (referenceCategory 1), by label or by code. */
+    private static boolean isWarningCancellation(References references) {
+        ReferenceCategoryType category = references.getReferenceCategory();
+        if (category == null) {
+            return false;
+        }
+        if (category.getValue() != null) {
+            return category.getValue() == ReferenceCategoryLabel.WARNING_CANCELLATION;
+        }
+        return category.getCode() != null
+                && category.getCode().equals(S124CodedValues.codeOf(ReferenceCategoryLabel.WARNING_CANCELLATION));
+    }
+
+    /**
+     * The key a message is paired under: its MRN, which is what a catalogue entry can be
+     * matched on. A message that states none gets a key of its own from its series fields, so
+     * that it can still be declared with {@link Builder#messagesWithoutDataset(List)} - but it
+     * can never match a cancellation, whose side of the pairing carries only the MRN.
+     */
+    private static String messageKey(MessageSeriesIdentifierType series) {
+        String mrn = series.getInteroperabilityIdentifier();
+        if (mrn != null && !mrn.isBlank()) {
+            return mrn.trim();
+        }
+        String warningType = series.getWarningType() == null ? ""
+                : series.getWarningType().getValue() != null ? series.getWarningType().getValue().name()
+                : String.valueOf(series.getWarningType().getCode());
+        return String.join("|", "series",
+                Objects.toString(series.getAgencyResponsibleForProduction(), ""),
+                Objects.toString(series.getNationality(), ""),
+                Objects.toString(series.getNameOfSeries(), ""),
+                String.valueOf(series.getYear()),
+                String.valueOf(series.getWarningNumber()),
+                warningType);
+    }
+
+    /** A message as a violation names it: number, year, series and MRN when stated. */
+    private static String describe(MessageSeriesIdentifierType series) {
+        String mrn = series.getInteroperabilityIdentifier();
+        return String.format("message %d/%d of series \"%s\"%s",
+                series.getWarningNumber(), series.getYear(),
+                Objects.toString(series.getNameOfSeries(), ""),
+                mrn == null || mrn.isBlank() ? ", which states no interoperabilityIdentifier" : " (" + mrn.trim() + ")");
+    }
+
+    /**
      * The dataset's NavwarnPreamble, the feature S-124 clause 12.2.2 aligns the temporal extent
      * with, or {@code null} when the dataset carries none.
      * <p/>
@@ -1778,11 +1998,22 @@ public final class S124ExchangeSetFactory {
      * certificate under the id this catalogue gives it. A chained signature whose certificate
      * is not supplied is rejected rather than emitted with a reference nothing resolves.</p>
      *
+     * <p>Two things in the reproduced entry are deliberately not the original's. The
+     * {@code issueTime}, which S-124 clause 12.2.2 defines as the "Time of day at which the data
+     * was made available", goes with the issue date it qualifies: it is the cancellation's, when
+     * given, and otherwise omitted - never the original's, which paired with the new date would
+     * name an instant at which nothing happened. And the catalogue-local {@code id} of each
+     * reused signature is reallocated, because the new catalogue numbers its own signatures from
+     * one as well and S-100 Part 15 resolves a {@code signatureRef} by that id; the signature
+     * value, its certificate reference and any chain between the entry's signatures are kept.</p>
+     *
      * @param original                     the cancelled dataset's discovery metadata,
      *                                     reproduced verbatim apart from the issue date and
      *                                     purpose; copied, never modified
      * @param issueDate                    the issue date of the cancellation itself, the one
      *                                     field the clause excepts from reproduction
+     * @param issueTime                    the UTC time of day the cancellation was made
+     *                                     available, or {@code null} to omit the attribute
      * @param certificatePems              the chain that verifies the reused signature, signing
      *                                     certificate first; empty means the exchange set's
      *                                     current Data Server certificate signed it
@@ -1794,18 +2025,31 @@ public final class S124ExchangeSetFactory {
     public record Cancellation(
             S100DatasetDiscoveryMetadata original,
             LocalDate issueDate,
+            LocalTime issueTime,
             List<String> certificatePems,
             Map<String, List<String>> counterSignerCertificatePems) {
 
         /** A cancellation whose original was signed with the current Data Server certificate. */
         public Cancellation(S100DatasetDiscoveryMetadata original, LocalDate issueDate) {
-            this(original, issueDate, List.of(), Map.of());
+            this(original, issueDate, null, List.of(), Map.of());
         }
 
         /** A cancellation whose reused signature carries no counter-signature. */
         public Cancellation(S100DatasetDiscoveryMetadata original, LocalDate issueDate,
                 List<String> certificatePems) {
-            this(original, issueDate, certificatePems, Map.of());
+            this(original, issueDate, null, certificatePems, Map.of());
+        }
+
+        /** A cancellation stating the time of day it was made available, without counter-signature. */
+        public Cancellation(S100DatasetDiscoveryMetadata original, LocalDate issueDate, LocalTime issueTime,
+                List<String> certificatePems) {
+            this(original, issueDate, issueTime, certificatePems, Map.of());
+        }
+
+        /** A counter-signed cancellation without a time of day. */
+        public Cancellation(S100DatasetDiscoveryMetadata original, LocalDate issueDate,
+                List<String> certificatePems, Map<String, List<String>> counterSignerCertificatePems) {
+            this(original, issueDate, null, certificatePems, counterSignerCertificatePems);
         }
 
         public Cancellation {
@@ -1853,6 +2097,7 @@ public final class S124ExchangeSetFactory {
     public static final class Builder {
         private List<Dataset> datasets = Collections.emptyList();
         private List<Cancellation> cancellations = Collections.emptyList();
+        private List<MessageSeriesIdentifierType> messagesWithoutDataset = Collections.emptyList();
         private String organization;
         private String producerCode;
         private String certificatePem;
@@ -1908,6 +2153,7 @@ public final class S124ExchangeSetFactory {
         private Builder(Builder other) {
             this.datasets = copyOfNullable(other.datasets);
             this.cancellations = copyOfNullable(other.cancellations);
+            this.messagesWithoutDataset = copyOfNullable(other.messagesWithoutDataset);
             this.organization = other.organization;
             this.producerCode = other.producerCode;
             this.certificatePem = other.certificatePem;
@@ -1949,8 +2195,37 @@ public final class S124ExchangeSetFactory {
         }
 
         public Builder datasets(List<Dataset> datasets) { this.datasets = datasets; return this; }
-        /** Fileless dataset cancellations (S-100 Part 17, clause 17-4.4.1); see {@link Cancellation}. */
+
+        /**
+         * Fileless dataset cancellations (S-100 Part 17, clause 17-4.4.1); see {@link Cancellation}.
+         * <p/>
+         * Each must be paired with a cancellation dataset in {@link #datasets(List)}: a dataset
+         * whose {@code References} of referenceCategory 1 (warning cancellation) names the
+         * withdrawn message by the MRN the cancelled entry carries as {@code datasetID}. S-124
+         * clause 9.3 knows no other way to deliver one, and the factory rejects an exchange set
+         * that cancels without the dataset, or whose dataset cancels without the fileless
+         * cancellation - see {@link #messagesWithoutDataset(List)} for the one exception.
+         */
         public Builder cancellations(List<Cancellation> cancellations) { this.cancellations = cancellations; return this; }
+
+        /**
+         * Messages a packaged dataset may cancel - with a {@code References} of referenceCategory
+         * 1 - without a matching fileless cancellation, because no S-124 dataset was ever
+         * published for them: a warning broadcast before the S-124 service started, or only by
+         * other means. There is then no file to withdraw and no original signature to reproduce,
+         * so S-100 Part 17, clause 17-4.4.1, cannot apply; the References alone records the
+         * cancellation of the message.
+         * <p/>
+         * A message is matched by its {@code interoperabilityIdentifier} when it states one, and
+         * otherwise by its series fields (agency, nationality, series name, year, number and
+         * warning type), so the identifiers to list here are the ones the References carry. A
+         * listed message that a cancellation also withdraws is simply paired; the declaration is
+         * not an error. Empty by default: every warning cancellation must then be matched.
+         */
+        public Builder messagesWithoutDataset(List<MessageSeriesIdentifierType> messages) {
+            this.messagesWithoutDataset = messages;
+            return this;
+        }
         public Builder organization(String organization) { this.organization = organization; return this; }
         public Builder producerCode(String producerCode) { this.producerCode = producerCode; return this; }
         public Builder certificatePem(String certificatePem) { this.certificatePem = certificatePem; return this; }
@@ -2081,6 +2356,7 @@ public final class S124ExchangeSetFactory {
         public S124ExchangeSetFactory build() {
             Objects.requireNonNull(datasets, "datasets must be set");
             Objects.requireNonNull(cancellations, "cancellations must be set");
+            Objects.requireNonNull(messagesWithoutDataset, "messagesWithoutDataset must be set");
             if (datasets.isEmpty() && cancellations.isEmpty()) {
                 throw new IllegalArgumentException("at least one dataset or cancellation must be provided");
             }

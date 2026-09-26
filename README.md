@@ -58,9 +58,11 @@ mvn -pl s-124 -am test -Dtest=DanishWatersExamplesGenerator -Dsurefire.failIfNoS
 ```
 
 Open `target/danish-nw-examples/README.md` after the command finishes. The output
-contains seven GML datasets, eight exchange-set ZIPs, an extracted combined set
-and signing material. These are demonstration warnings; the exchange sets are
-marked `notForNavigation`.
+contains seven GML datasets, eight exchange-set ZIPs, an extracted combined set,
+signing material, and a self-contained `fileless-cancellation/` folder: a worked
+example of a cancellation dataset delivered together with a fileless cancellation
+of the warning it withdraws, with its own README. These are demonstration
+warnings; the exchange sets are marked `notForNavigation`.
 
 The generator uses OpenSSL for temporary signing keys and falls back to dummy
 signatures if that setup fails. See the [example guide](docs/usage.md#generate-example-datasets)

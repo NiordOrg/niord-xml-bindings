@@ -424,6 +424,34 @@ public class S100ExchangeSetUtils {
     }
 
     /**
+     * Wraps a signature in the element S-100 Part 15 declares for its concrete type, for a
+     * {@code digitalSignatureValue} of the exchange catalogue.
+     * <p/>
+     * Part 15 declares {@code S100_SE_SignatureOnData} and {@code S100_SE_SignatureOnSignature} as
+     * substitution-group members of {@code S100_SE_DigitalSignature}, so the same signature can be
+     * written either as its own element or as the head element with an {@code xsi:type}. Both are
+     * schema-valid and the same to a schema-aware reader, but a catalogue that spells the two forms
+     * side by side - which happens as soon as an entry built here is reproduced by a fileless
+     * cancellation (S-100 Part 17, clause 17-4.4.1) - is needlessly two things to a reader that
+     * matches on element names. Every builder in this package therefore writes the member element
+     * whenever the signature has a concrete type, and the head element only for the base type.
+     *
+     * @param signature the signature to wrap
+     * @return the JAXB element for the signature's concrete type
+     */
+    public static JAXBElement<? extends dk.dma.niord.s100.catalog._5_2.S100SEDigitalSignature> digitalSignatureElement(
+            dk.dma.niord.s100.catalog._5_2.S100SEDigitalSignature signature) {
+        final dk.dma.niord.s100.catalog._5_2.ObjectFactory objectFactory = new dk.dma.niord.s100.catalog._5_2.ObjectFactory();
+        if (signature instanceof dk.dma.niord.s100.catalog._5_2.S100SESignatureOnData onData) {
+            return objectFactory.createS100SESignatureOnData(onData);
+        }
+        if (signature instanceof dk.dma.niord.s100.catalog._5_2.S100SESignatureOnSignature onSignature) {
+            return objectFactory.createS100SESignatureOnSignature(onSignature);
+        }
+        return objectFactory.createS100SEDigitalSignature(signature);
+    }
+
+    /**
      * The character string input object contains the XML content of the S100
      * Exchange Set Catalogue. We can easily translate that into an
      * S100ExchangeCatalogue object so that it can be accessed more efficiently.

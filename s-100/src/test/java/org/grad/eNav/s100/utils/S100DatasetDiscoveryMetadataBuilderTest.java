@@ -17,6 +17,7 @@
 package org.grad.eNav.s100.utils;
 
 import dk.dma.niord.s100.catalog._5_2.*;
+import jakarta.xml.bind.JAXBException;
 import org.grad.eNav.s100.enums.MaintenanceFrequency;
 import org.grad.eNav.s100.enums.RoleCode;
 import org.grad.eNav.s100.enums.SecurityClassification;
@@ -706,6 +707,38 @@ class S100DatasetDiscoveryMetadataBuilderTest {
 
         assertEquals(1, metadata.getDigitalSignatureValues().size());
         assertEquals(digitalSignatureValue, metadata.getDigitalSignatureValues().get(0));
+    }
+
+    /**
+     * S-100 Part 15 declares S100_SE_SignatureOnData as a substitution-group member of
+     * S100_SE_DigitalSignature, so a signature of that type can be written as its own element
+     * or as the head element with an xsi:type. The builder writes the member element, so that
+     * an entry it builds and the reproduction of it a fileless cancellation carries (S-100 Part
+     * 17, clause 17-4.4.1) spell the signature the same way; the base type still goes out as
+     * the head element.
+     */
+    @Test
+    void testBuildWritesTheSignatureAsTheElementOfItsConcreteType() throws JAXBException {
+        final S100ExchangeSetSignatureProvider onDataProvider = (id, algorithm, payload) -> {
+            final S100SESignatureOnData signature = new S100SESignatureOnData();
+            signature.setId("sig");
+            signature.setCertificateRef("ref");
+            signature.setDataStatus(DataStatus.UNENCRYPTED);
+            signature.setValue("signature".getBytes());
+            return signature;
+        };
+
+        final S100DatasetDiscoveryMetadata onData = this.minimalBuilder(onDataProvider).build("dataset".getBytes());
+        final String xml = S100ExchangeSetUtils.marshalS100DatasetDiscoveryMetadata(onData);
+
+        assertEquals("S100_SE_SignatureOnData",
+                onData.getDigitalSignatureValues().get(0).getS100SEDigitalSignature().getName().getLocalPart());
+        assertTrue(xml.contains("S100_SE_SignatureOnData"), xml);
+        assertFalse(xml.contains("xsi:type"), xml);
+
+        final S100DatasetDiscoveryMetadata base = this.minimalBuilder().build("dataset".getBytes());
+        assertEquals("S100_SE_DigitalSignature",
+                base.getDigitalSignatureValues().get(0).getS100SEDigitalSignature().getName().getLocalPart());
     }
 
     /**

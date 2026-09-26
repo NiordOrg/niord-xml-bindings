@@ -215,9 +215,50 @@ that cancels an old dataset while publishing a new one therefore carries both
 spellings; that is the correct output, not a defect.
 
 Create `new S124ExchangeSetFactory.Cancellation(originalMetadata, issueDate)` and
-pass the entries to `builder.cancellations(...)`. A cancellation-only
-set still needs the organization, producer code, certificate and signer because
-the new catalogue must be signed.
+pass the entries to `builder.cancellations(...)`. The reproduced entry differs
+from the original in its purpose, its issue date and, when you give one, its
+issue time: the `Cancellation` constructor that takes a `LocalTime` sets the
+UTC time of day the cancellation was made available, and without it the
+attribute is omitted rather than inherited from the original. The reused
+signature keeps its value and certificate reference but is carried under an id
+of the new catalogue's own (`sigC1`, `sigC2`, …), because the catalogue numbers
+its dataset signatures from `sig1` too and Part 15 resolves a `signatureRef` by
+that id.
+
+### An S-124 cancellation is a dataset plus a fileless cancellation
+
+For S-124 the fileless cancellation does not travel alone. Clause 9.3 lists the
+ways an S-124 dataset is cancelled, and both that a producer initiates deliver a
+*cancellation dataset* together with the fileless cancellation: a new numbered
+message whose `References` has referenceCategory 1 (warning cancellation) and
+names the warning being withdrawn, "as well as including a fileless cancellation
+(see S-100 Part 17, clause 17-4.4.1) of the dataset being cancelled".
+
+The factory enforces that pairing and fails the build with an
+`S124ConformanceException` otherwise:
+
+- A cancellation-only exchange set is rejected. It is valid S-100 Part 17, but
+  not one of the four ways of clause 9.3.
+- Every fileless cancellation must be named by a category-1 `References` in a
+  packaged dataset, and every such `References` must be matched by a fileless
+  cancellation. The pairing key is the MRN of clause 12.2.2: the `datasetID` of
+  the cancelled entry, which the `References`' `messageSeriesIdentifier` must
+  carry as its `interoperabilityIdentifier`. Take it from the retained entry
+  when you build the cancellation message.
+- The one exception is a message that was never published as an S-124 dataset,
+  for instance a warning broadcast before the service started. There is then
+  nothing to withdraw, and the `References` alone records the cancellation.
+  Declare such messages with `builder.messagesWithoutDataset(...)`, passing the
+  `messageSeriesIdentifier`s the `References` carry; a message that states no
+  MRN is matched by its series fields.
+
+A new in-force bulletin is not paired with anything: S-124 Table 8-1 has it
+supersede the previous bulletin by type, not by cancellation, and the previous
+bulletin's file is not withdrawn filelessly.
+
+The [example generator](usage.md#generate-example-datasets) produces a complete
+worked example of the pairing in its `fileless-cancellation/` folder, with the
+original set, the retained entry and the cancelling set side by side.
 
 ### Capture the entry when you publish
 
