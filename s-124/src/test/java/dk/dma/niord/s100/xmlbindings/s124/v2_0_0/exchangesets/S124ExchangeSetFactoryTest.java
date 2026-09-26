@@ -2033,6 +2033,32 @@ class S124ExchangeSetFactoryTest {
     }
 
     /**
+     * A References that states noMessageOnHand names nothing, whatever identifiers are written
+     * alongside it (S-124 clause 4.3), and Table 8-1 requires a warning cancellation to state
+     * false. Such a dataset must not satisfy the pairing: the dataset is rejected on its own
+     * terms first, with the identifiers it wrote never counted.
+     */
+    @Test
+    void rejectsAWarningCancellationThatStatesNoMessageOnHand() throws Exception {
+        S124ExchangeSetFactory.Cancellation cancellation = cancellationOf(newDataset("DK.S124.on-hand"));
+        Dataset cancelling = cancellingDataset("DK.S124.on-hand-cancel", cancellation);
+        membersOf(cancelling).getNavwarnPartsAndNavwarnAreaAffectedsAndTextPlacements().stream()
+                .filter(References.class::isInstance)
+                .map(References.class::cast)
+                .forEach(references -> references.setNoMessageOnHand(true));
+
+        S124ExchangeSetFactory factory = publisher()
+                .datasets(List.of(cancelling))
+                .cancellations(List.of(cancellation))
+                .build();
+
+        assertThatThrownBy(factory::toBytes)
+                .isInstanceOf(S124ConformanceException.class)
+                .hasMessageContaining("noMessageOnHand true")
+                .hasMessageContaining("Table 8-1");
+    }
+
+    /**
      * The reused signatures get ids of the new catalogue's own. The dataset entries number
      * theirs sig1, sig2, ... from one, and so did the catalogue each original came from, so in
      * the clause 9.3 case - a cancellation dataset delivered with the fileless cancellation -

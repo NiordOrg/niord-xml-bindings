@@ -16,6 +16,7 @@ import dk.dma.niord.s100.xmlbindings.s100.gml.base._5_0.MDTopicCategoryCode;
 import dk.dma.niord.s100.xmlbindings.s100.gml.base._5_0.PointProperty;
 import dk.dma.niord.s100.xmlbindings.s100.gml.base._5_0.impl.DataSetIdentificationTypeImpl;
 import dk.dma.niord.s100.xmlbindings.s100.gml.profiles._5_0.ReferenceType;
+import dk.dma.niord.s100.xmlbindings.s100.gml.profiles._5_0.impl.ReferenceTypeImpl;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.Dataset;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.FixedDateRangeType;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.GeneralAreaType;
@@ -28,6 +29,9 @@ import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.NavwarnPreamble;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.NavwarnTypeGeneralLabel;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.NavwarnTypeGeneralType;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ObjectFactory;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ReferenceCategoryLabel;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ReferenceCategoryType;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.References;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.WarningInformationType;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.WarningTypeLabel;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.WarningTypeType;
@@ -67,6 +71,31 @@ final class S124TestDatasets {
         NavwarnPreamble second = preamble();
         second.setId("PR.2");
         dataset.getMembers().getNavwarnPartsAndNavwarnAreaAffectedsAndTextPlacements().add(second);
+    }
+
+    /**
+     * Adds a References of the given category to the dataset's preamble, stating
+     * {@code noMessageOnHand} and naming {@code identifiers} messages - a combination the caller
+     * chooses, since the schema allows every one of them and S-124 does not.
+     */
+    static References addReferences(Dataset dataset, ReferenceCategoryLabel category,
+            boolean noMessageOnHand, int identifiers) {
+        ObjectFactory of = new ObjectFactory();
+        References references = of.createReferences();
+        references.setId("REF.1");
+        references.setNoMessageOnHand(noMessageOnHand);
+        ReferenceCategoryType categoryType = of.createReferenceCategoryType();
+        categoryType.setValue(category);
+        references.setReferenceCategory(categoryType);
+        for (int i = 0; i < identifiers; i++) {
+            references.getMessageSeriesIdentifiers().add(messageSeriesIdentifier());
+        }
+        ReferenceType theWarning = new ReferenceTypeImpl();
+        theWarning.setHref("#" + preambleOf(dataset).getId());
+        theWarning.setRole("theWarning");
+        references.setTheWarning(theWarning);
+        dataset.getMembers().getNavwarnPartsAndNavwarnAreaAffectedsAndTextPlacements().add(references);
+        return references;
     }
 
     /** Adds a NavwarnPart whose fixedDateRange carries the given times of day. */

@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import dk.dma.niord.s100.xmlbindings.s100.gml.profiles._5_0.ReferenceType;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.Dataset;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ReferenceCategoryLabel;
 
 /**
  * The S-124 rules that no XML schema can express, and which therefore have to be checked in code.
@@ -55,6 +56,69 @@ class S124DatasetValidatorTest {
                 .isInstanceOf(S124ConformanceException.class)
                 .hasMessageContaining("carries no NavwarnPreamble")
                 .hasMessageContaining("S-124 clause 4");
+    }
+
+    /**
+     * S-124 clause 4.3 constrains References: "If noMessageOnHand=true, then
+     * messageSeriesIdentifier is prohibited". The schema does not, so a References can claim to
+     * name nothing while naming several - and a reader honouring the flag would act on nothing.
+     */
+    @Test
+    void rejectsAReferencesThatStatesNoMessageOnHandYetNamesMessages() {
+        Dataset dataset = S124TestDatasets.datasetWithPreamble();
+        S124TestDatasets.addReferences(dataset, ReferenceCategoryLabel.IN_FORCE, true, 2);
+
+        assertThatThrownBy(() -> S124DatasetValidator.validate(dataset))
+                .isInstanceOf(S124ConformanceException.class)
+                .hasMessageContaining("noMessageOnHand true yet carries 2 messageSeriesIdentifiers")
+                .hasMessageContaining("S-124 clause 4.3");
+    }
+
+    /** And the converse: "if noMessageOnHand=false, then messageSeriesIdentifier is mandatory". */
+    @Test
+    void rejectsAReferencesThatStatesMessagesOnHandYetNamesNone() {
+        Dataset dataset = S124TestDatasets.datasetWithPreamble();
+        S124TestDatasets.addReferences(dataset, ReferenceCategoryLabel.WARNING_CANCELLATION, false, 0);
+
+        assertThatThrownBy(() -> S124DatasetValidator.validate(dataset))
+                .isInstanceOf(S124ConformanceException.class)
+                .hasMessageContaining("noMessageOnHand false yet carries no messageSeriesIdentifier")
+                .hasMessageContaining("S-124 clause 4.3");
+    }
+
+    /**
+     * Table 8-1 defines a cancellation as a References "with noMessageOnHand equal false, and with
+     * referenceCategory set to 1 (warning cancellation), and one or more instances of
+     * messageSeriesIdentifier"; clause 8.1.4 reserves noMessageOnHand true for the in-force
+     * bulletin of a series with nothing active. A warning cancellation claiming it names nothing
+     * to cancel, whatever identifiers are written alongside.
+     */
+    @Test
+    void rejectsAWarningCancellationThatStatesNoMessageOnHand() {
+        Dataset dataset = S124TestDatasets.datasetWithPreamble();
+        S124TestDatasets.addReferences(dataset, ReferenceCategoryLabel.WARNING_CANCELLATION, true, 1);
+
+        assertThatThrownBy(() -> S124DatasetValidator.validate(dataset))
+                .isInstanceOf(S124ConformanceException.class)
+                .hasMessageContaining("referenceCategory 1 (warning cancellation) with noMessageOnHand true")
+                .hasMessageContaining("S-124 Table 8-1 / clause 8.1.4")
+                // The model constraint is broken too, and both are reported.
+                .hasMessageContaining("noMessageOnHand true yet carries 1 messageSeriesIdentifier;");
+    }
+
+    /**
+     * The two conformant shapes: a cancellation naming what it cancels, and the clause 8.1.4
+     * bulletin of a series with no active warnings.
+     */
+    @Test
+    void acceptsConformantReferences() {
+        Dataset cancelling = S124TestDatasets.datasetWithPreamble();
+        S124TestDatasets.addReferences(cancelling, ReferenceCategoryLabel.WARNING_CANCELLATION, false, 1);
+        assertThat(S124DatasetValidator.violations(cancelling)).isEmpty();
+
+        Dataset nothingOnHand = S124TestDatasets.datasetWithPreamble();
+        S124TestDatasets.addReferences(nothingOnHand, ReferenceCategoryLabel.IN_FORCE, true, 0);
+        assertThat(S124DatasetValidator.violations(nothingOnHand)).isEmpty();
     }
 
     /**

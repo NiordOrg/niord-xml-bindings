@@ -335,8 +335,10 @@ public final class S124ExchangeSetFactory {
      */
     public ExchangeSet toExchangeSet() {
         try {
-            checkCancellationPairing();
+            // Datasets first: their own conformance is checked as they are marshalled, and a
+            // dataset-level defect reads better than the set-level symptom it would cause below.
             List<DatasetFile> datasetFiles = marshalDatasets();
+            checkCancellationPairing();
             S100ExchangeCatalogue catalogue = buildCatalogue(datasetFiles);
             byte[] catalogBytes = S100ExchangeSetUtils.marshalS100ExchangeSetCatalogue(catalogue)
                     .getBytes(StandardCharsets.UTF_8);
@@ -1670,7 +1672,8 @@ public final class S124ExchangeSetFactory {
 
     /**
      * Enforces, in both directions, the pairing S-124 clause 9.3 imposes on a fileless
-     * cancellation - before anything is marshalled or signed.
+     * cancellation - after the datasets have passed {@link S124DatasetValidator}, and before the
+     * catalogue is built or anything signed.
      * <p/>
      * Clause 9.3 lists four ways an S-124 dataset may be cancelled. Two are passive: an expiry
      * date that passes, and absence from the most recent in-force bulletin, which clause 8.1.3
@@ -1699,11 +1702,16 @@ public final class S124ExchangeSetFactory {
         final String clause = "S-124 clause 9.3";
         List<S124DatasetValidator.Violation> violations = new ArrayList<>();
 
-        // What the packaged datasets say they cancel, keyed by MRN.
+        // What the packaged datasets say they cancel, keyed by MRN. A References that states
+        // noMessageOnHand names nothing, whatever identifiers are written alongside (S-124
+        // clause 4.3 prohibits them, and the validator has rejected the combination by now);
+        // the flag is honoured here too, so that the pairing never rests on a claim the
+        // References itself withdraws.
         Map<String, String> referenced = new LinkedHashMap<>();
         for (Dataset dataset : cfg.datasets) {
             for (AbstractGMLType member : members(dataset)) {
-                if (member instanceof References references && isWarningCancellation(references)) {
+                if (member instanceof References references && isWarningCancellation(references)
+                        && !references.isNoMessageOnHand()) {
                     for (MessageSeriesIdentifierType series : references.getMessageSeriesIdentifiers()) {
                         referenced.putIfAbsent(messageKey(series), describe(series));
                     }
