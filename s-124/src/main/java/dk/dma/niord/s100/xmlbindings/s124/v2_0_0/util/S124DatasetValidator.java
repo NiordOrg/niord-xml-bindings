@@ -16,6 +16,9 @@ import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.Dataset;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.FixedDateRangeType;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.MessageSeriesIdentifierType;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.NavwarnPreamble;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ReferenceCategoryLabel;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ReferenceCategoryType;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.References;
 
 /**
  * Checks a dataset against the S-124 rules the GML application schema cannot express.
@@ -92,6 +95,7 @@ public final class S124DatasetValidator {
         List<Violation> violations = new ArrayList<>();
         checkSinglePreamble(dataset, violations);
         checkApplicationProfile(dataset, violations);
+        checkReferences(dataset, violations);
         checkWalkedRules(dataset, violations);
         for (String mismatch : S124CodedValues.codeMismatches(dataset)) {
             violations.add(new Violation("S-100 Part 10b, clause 10b-8.2.4", mismatch));
@@ -183,6 +187,72 @@ public final class S124DatasetValidator {
                         + "each, or encode an in-force bulletin as a single preamble whose "
                         + "References instance has referenceCategory 3 (in-force)",
                 preambles)));
+    }
+
+    /**
+     * The constraints S-124 puts on a References, which the schema leaves unexpressed.
+     * <p/>
+     * The data model of clause 4.3 constrains the information type twice: "If noMessageOnHand=true,
+     * then messageSeriesIdentifier is prohibited" and "if noMessageOnHand=false, then
+     * messageSeriesIdentifier is mandatory". The schema makes {@code messageSeriesIdentifier}
+     * 0..* regardless, so a References can claim to name nothing while naming several, and a
+     * reader that honours the flag then cancels, or lists, nothing of what was written.
+     * <p/>
+     * A warning cancellation cannot claim it at all. Table 8-1 defines the cancelling dataset by
+     * "at least one References instance with noMessageOnHand equal false, and with
+     * referenceCategory set to 1 (warning cancellation), and one or more instances of
+     * messageSeriesIdentifier", and clause 8.1.4 reserves noMessageOnHand true for the in-force
+     * bulletin of a series with no active warnings - the one References that legitimately names
+     * nothing.
+     */
+    private static void checkReferences(Dataset dataset, List<Violation> violations) {
+        for (Object member : membersOf(dataset)) {
+            if (!(member instanceof References references)) {
+                continue;
+            }
+            String subject = references.getId() == null || references.getId().isBlank()
+                    ? "a References"
+                    : "References " + references.getId();
+            int identifiers = references.getMessageSeriesIdentifiers().size();
+            if (references.isNoMessageOnHand()) {
+                if (identifiers > 0) {
+                    violations.add(new Violation("S-124 clause 4.3 (References constraints)", String.format(
+                            "%s states noMessageOnHand true yet carries %d messageSeriesIdentifier%s; the "
+                                    + "data model prohibits messageSeriesIdentifier when noMessageOnHand "
+                                    + "is true - set it false, or drop the identifiers",
+                            subject, identifiers, identifiers == 1 ? "" : "s")));
+                }
+                if (isWarningCancellation(references)) {
+                    violations.add(new Violation("S-124 Table 8-1 / clause 8.1.4", String.format(
+                            "%s has referenceCategory 1 (warning cancellation) with noMessageOnHand true; "
+                                    + "Table 8-1 defines a cancellation as a References with "
+                                    + "noMessageOnHand equal false and one or more "
+                                    + "messageSeriesIdentifier, and clause 8.1.4 reserves "
+                                    + "noMessageOnHand true for the in-force bulletin of a series with "
+                                    + "no active warnings",
+                            subject)));
+                }
+            } else if (identifiers == 0) {
+                violations.add(new Violation("S-124 clause 4.3 (References constraints)", String.format(
+                        "%s states noMessageOnHand false yet carries no messageSeriesIdentifier; the data "
+                                + "model makes messageSeriesIdentifier mandatory when noMessageOnHand is "
+                                + "false - name the messages, or set noMessageOnHand true",
+                        subject)));
+            }
+        }
+    }
+
+    /** Whether a References is a warning cancellation (referenceCategory 1), by label or by code. */
+    private static boolean isWarningCancellation(References references) {
+        ReferenceCategoryType category = references.getReferenceCategory();
+        if (category == null) {
+            return false;
+        }
+        if (category.getValue() != null) {
+            return category.getValue() == ReferenceCategoryLabel.WARNING_CANCELLATION;
+        }
+        return category.getCode() != null
+                && category.getCode().equals(S124CodedValues.codeOf(ReferenceCategoryLabel.WARNING_CANCELLATION));
     }
 
     /**

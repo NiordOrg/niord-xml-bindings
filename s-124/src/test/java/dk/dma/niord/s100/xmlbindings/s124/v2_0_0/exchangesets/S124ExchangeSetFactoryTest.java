@@ -93,6 +93,10 @@ import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.NavwarnTypeGeneralLabel;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.NavwarnTypeGeneralType;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.NavwarnPreamble;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ObjectFactory;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ReferenceCategoryLabel;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.ReferenceCategoryType;
+import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.References;
+import dk.dma.niord.s100.xmlbindings.s100.gml.profiles._5_0.impl.ReferenceTypeImpl;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.WarningInformationType;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.WarningTypeLabel;
 import dk.dma.niord.s100.xmlbindings.s124.v2_0_0.WarningTypeType;
@@ -434,6 +438,7 @@ class S124ExchangeSetFactoryTest {
 
         // ... but the exchange set is now produced under a different certificate.
         byte[] zipBytes = S124ExchangeSetFactory.builder()
+                .datasets(List.of(cancellingDataset("DK.S124.rotated-cancel", cancellation)))
                 .cancellations(List.of(cancellation))
                 .organization("Danish Maritime Authority")
                 .producerCode("DK00")
@@ -455,7 +460,7 @@ class S124ExchangeSetFactoryTest {
                 .collect(Collectors.toMap(S100SECertificateType::getId,
                         S124ExchangeSetFactoryTest::pemOf));
 
-        String ref = catalogue.getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas().get(0)
+        String ref = cancellationEntryOf(catalogue)
                 .getDigitalSignatureValues().get(0).getS100SEDigitalSignature().getValue()
                 .getCertificateRef();
 
@@ -479,6 +484,7 @@ class S124ExchangeSetFactoryTest {
                 newDataset("DK.S124.shared-ca"), List.of(dataServerPreviousPem, domainCoordinatorPem));
 
         byte[] zipBytes = S124ExchangeSetFactory.builder()
+                .datasets(List.of(cancellingDataset("DK.S124.shared-ca-cancel", cancellation)))
                 .cancellations(List.of(cancellation))
                 .organization("Danish Maritime Authority")
                 .producerCode("DK00")
@@ -506,7 +512,7 @@ class S124ExchangeSetFactoryTest {
                         .isIn(union(pemById.keySet(), schemeAdministrator)));
 
         // ... including the one the cancellation's reused signature points at.
-        String ref = catalogue.getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas().get(0)
+        String ref = cancellationEntryOf(catalogue)
                 .getDigitalSignatureValues().get(0).getS100SEDigitalSignature().getValue()
                 .getCertificateRef();
         assertThat(pemById).containsKey(ref);
@@ -550,6 +556,7 @@ class S124ExchangeSetFactoryTest {
 
         // 2. Rotate to B and cancel, handing over the retained entry and the chain that signed it.
         byte[] cancellationZip = S124ExchangeSetFactory.builder()
+                .datasets(List.of(cancellingDatasetOf("DK.S124.real-rotation-cancel", originalEntry.getDatasetID())))
                 .cancellations(List.of(new S124ExchangeSetFactory.Cancellation(
                         originalEntry, originalEntry.getIssueDate().plusDays(7), List.of(a.certificatePem()))))
                 .organization("Danish Maritime Authority")
@@ -560,16 +567,16 @@ class S124ExchangeSetFactoryTest {
                 .build()
                 .toBytes();
         Map<String, byte[]> entries = unzip(cancellationZip);
-        assertThat(datasetFileCount(entries)).as("a fileless cancellation ships no dataset file").isZero();
+        assertThat(datasetFileCount(entries))
+                .as("only the cancellation dataset ships a file; the cancelled one does not")
+                .isEqualTo(1);
         String catalogXml = new String(entries.get("S100_ROOT/CATALOG.XML"), StandardCharsets.UTF_8);
         assertThat(validateAgainstCatalogueSchema(catalogXml))
                 .as("XSD validation errors in CATALOG.XML:\n%s", catalogXml)
                 .isEmpty();
 
         S100ExchangeCatalogue catalogue = catalogueOf(cancellationZip);
-        S100DatasetDiscoveryMetadata cancellation =
-                catalogue.getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas().get(0);
-        assertThat(cancellation.getPurpose()).isEqualTo(S100Purpose.CANCELLATION);
+        S100DatasetDiscoveryMetadata cancellation = cancellationEntryOf(catalogue);
         S100SESignatureOnData reused = dataSignatureOf(cancellation);
         assertThat(reused.getValue()).as("the reused signature is the original, byte for byte")
                 .isEqualTo(originalSignature);
@@ -742,7 +749,7 @@ class S124ExchangeSetFactoryTest {
                 newDataset("DK.S124.same-cert"), List.of(dataServerViaDcPem, domainCoordinatorPem));
 
         byte[] zipBytes = S124ExchangeSetFactory.builder()
-                .datasets(List.of(newDataset("DK.S124.same-cert-active")))
+                .datasets(List.of(cancellingDataset("DK.S124.same-cert-active", cancellation)))
                 .cancellations(List.of(cancellation))
                 .organization("Danish Maritime Authority")
                 .producerCode("DK00")
@@ -790,8 +797,8 @@ class S124ExchangeSetFactoryTest {
         assertThat(cancellation.original().getPurpose()).isEqualTo(S100Purpose.NEW_DATASET);
 
         // Each catalogue carries the signing certificate under an id of its own, and both resolve to it.
-        S100SESignatureOnData inFirst = dataSignatureOf(firstEntryOf(first));
-        S100SESignatureOnData inSecond = dataSignatureOf(firstEntryOf(second));
+        S100SESignatureOnData inFirst = dataSignatureOf(cancellationEntryOf(first));
+        S100SESignatureOnData inSecond = dataSignatureOf(cancellationEntryOf(second));
         assertThat(inFirst.getValue()).isEqualTo(bytesBefore);
         assertThat(inSecond.getValue()).isEqualTo(bytesBefore);
         assertThat(inFirst.getCertificateRef()).isEqualTo("cer1");
@@ -827,6 +834,7 @@ class S124ExchangeSetFactoryTest {
                 counterSignature("s3", dataSignatureId, "cerCounterSigner"));
 
         byte[] zipBytes = S124ExchangeSetFactory.builder()
+                .datasets(List.of(cancellingDataset("DK.S124.countersigned-cancel", seed)))
                 .cancellations(List.of(new S124ExchangeSetFactory.Cancellation(
                         original, seed.issueDate(), List.of(),
                         Map.of("cerCounterSigner", List.of(dataServerPreviousPem, domainCoordinatorPem)))))
@@ -839,9 +847,7 @@ class S124ExchangeSetFactoryTest {
                 .toBytes();
 
         S100ExchangeCatalogue catalogue = catalogueOf(zipBytes);
-        S100DatasetDiscoveryMetadata emitted = catalogue
-                .getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas().get(0);
-        assertThat(emitted.getPurpose()).isEqualTo(S100Purpose.CANCELLATION);
+        S100DatasetDiscoveryMetadata emitted = cancellationEntryOf(catalogue);
         assertThat(emitted.getDigitalSignatureValues()).hasSize(2);
 
         // The dataset signature still resolves to the certificate carried for the cancellation.
@@ -850,14 +856,16 @@ class S124ExchangeSetFactoryTest {
         assertThat(onData).isInstanceOf(S100SESignatureOnData.class);
         assertThat(onData.getCertificateRef()).isEqualTo("cer1");
 
-        // The chained signature keeps its subtype and its signatureRef ...
+        // The chained signature keeps its subtype and its chain: both signatures now carry ids
+        // of this catalogue's own, and the signatureRef follows the data signature's new id ...
         S100SEDigitalSignature chained = emitted.getDigitalSignatureValues().get(1)
                 .getS100SEDigitalSignature().getValue();
         assertThat(chained).isInstanceOfSatisfying(S100SESignatureOnSignature.class, s -> {
-            assertThat(s.getId()).isEqualTo("s3");
-            assertThat(s.getSignatureRef()).isEqualTo(dataSignatureId);
+            assertThat(s.getId()).isNotEqualTo("s3").isNotEqualTo(onData.getId());
+            assertThat(s.getSignatureRef()).isEqualTo(onData.getId()).isNotEqualTo(dataSignatureId);
             assertThat(s.getValue()).isEqualTo("counter-signature".getBytes(StandardCharsets.UTF_8));
         });
+        assertThat(signatureIdsOf(catalogue)).doesNotHaveDuplicates();
 
         // ... and its certificateRef resolves, to the counter-signer's certificate rather than
         // to the data signer's (clause 15-8.11.5: "Identifier of the certificate against which
@@ -882,7 +890,7 @@ class S124ExchangeSetFactoryTest {
         assertThat(catalogXml)
                 .as("CATALOG.XML:%n%s", catalogXml)
                 .contains("S100_SE_SignatureOnSignature")
-                .contains("signatureRef=\"" + dataSignatureId + "\"");
+                .contains("signatureRef=\"" + onData.getId() + "\"");
         assertThat(validateAgainstCatalogueSchema(catalogXml))
                 .as("XSD validation errors in CATALOG.XML:\n%s", catalogXml)
                 .isEmpty();
@@ -911,6 +919,7 @@ class S124ExchangeSetFactoryTest {
                 counterSignature("s3", dataSignatureId, "cerCounterSigner"));
 
         S124ExchangeSetFactory factory = S124ExchangeSetFactory.builder()
+                .datasets(List.of(cancellingDataset("DK.S124.countersigned-cancel", seed)))
                 .cancellations(List.of(new S124ExchangeSetFactory.Cancellation(original, seed.issueDate())))
                 .organization("Danish Maritime Authority")
                 .producerCode("DK00")
@@ -937,6 +946,7 @@ class S124ExchangeSetFactoryTest {
         original.getDigitalSignatureValues().add(counterSignature("s3", null, "cerCounterSigner"));
 
         S124ExchangeSetFactory factory = S124ExchangeSetFactory.builder()
+                .datasets(List.of(cancellingDataset("DK.S124.countersigned-cancel", seed)))
                 .cancellations(List.of(new S124ExchangeSetFactory.Cancellation(original, seed.issueDate())))
                 .organization("Danish Maritime Authority")
                 .producerCode("DK00")
@@ -964,6 +974,7 @@ class S124ExchangeSetFactoryTest {
         original.getDigitalSignatureValues().add(counterSignature("s3", dataSignatureId, null));
 
         S124ExchangeSetFactory factory = S124ExchangeSetFactory.builder()
+                .datasets(List.of(cancellingDataset("DK.S124.countersigned-cancel", seed)))
                 .cancellations(List.of(new S124ExchangeSetFactory.Cancellation(original, seed.issueDate())))
                 .organization("Danish Maritime Authority")
                 .producerCode("DK00")
@@ -1057,10 +1068,15 @@ class S124ExchangeSetFactoryTest {
         return catalogueOf(zip).getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas().get(0);
     }
 
-    /** A cancellation-only exchange set built under the given current chain, with dummy signatures. */
+    /**
+     * An exchange set cancelling one dataset the way S-124 clause 9.3 requires - the cancellation
+     * dataset plus the fileless cancellation - built under the given current chain, with dummy
+     * signatures.
+     */
     private static byte[] cancellationExchangeSet(S124ExchangeSetFactory.Cancellation cancellation,
             String certificatePem, List<String> intermediatePems) {
         return S124ExchangeSetFactory.builder()
+                .datasets(List.of(cancellingDataset("DK.S124.cancelling", cancellation)))
                 .cancellations(List.of(cancellation))
                 .organization("Danish Maritime Authority")
                 .producerCode("DK00")
@@ -1083,8 +1099,12 @@ class S124ExchangeSetFactoryTest {
         S124ExchangeSetFactory.Cancellation cancellation = cancellationOf(newDataset("DK.S124.drift"));
         S100DatasetDiscoveryMetadata original = cancellation.original();
 
-        // Everything about the producer has changed since the dataset was published.
+        // Everything about the producer has changed since the dataset was published - the
+        // cancellation dataset is packaged under the new producer code, as its file name shows.
+        Dataset cancelling = cancellingDataset("DK.S124.drift-cancel", cancellation);
+        cancelling.getDatasetIdentificationInformation().setDatasetFileIdentifier("124XX99DKS124driftcancel.GML");
         byte[] zipBytes = S124ExchangeSetFactory.builder()
+                .datasets(List.of(cancelling))
                 .cancellations(List.of(cancellation))
                 .organization("Some Other Authority")
                 .producerCode("XX99")
@@ -1096,8 +1116,7 @@ class S124ExchangeSetFactoryTest {
                 .build()
                 .toBytes();
 
-        S100DatasetDiscoveryMetadata emitted = catalogueOf(zipBytes)
-                .getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas().get(0);
+        S100DatasetDiscoveryMetadata emitted = cancellationEntryOf(zipBytes);
 
         // The two fields that legitimately differ.
         assertThat(emitted.getPurpose()).isEqualTo(S100Purpose.CANCELLATION);
@@ -1721,7 +1740,7 @@ class S124ExchangeSetFactoryTest {
                 cancellationOf(newDataset("DK.S124.xsd-validity-cancelled"));
 
         byte[] zipBytes = S124ExchangeSetFactory.builder()
-                .datasets(List.of(newDataset("DK.S124.xsd-validity-active")))
+                .datasets(List.of(cancellingDataset("DK.S124.xsd-validity-active", cancellation)))
                 .cancellations(List.of(cancellation))
                 .organization("Danish Maritime Authority")
                 .producerCode("DK00")
@@ -1859,7 +1878,9 @@ class S124ExchangeSetFactoryTest {
         S124ExchangeSetFactory.Cancellation cancellation =
                 new S124ExchangeSetFactory.Cancellation(originalMeta, cancellationDate);
 
-        Dataset stillActive = newDataset("DK.S124.still-active");
+        // The cancellation message, packaged as S-124 clause 9.3 requires alongside the
+        // fileless cancellation.
+        Dataset stillActive = cancellingDataset("DK.S124.still-active", cancellation);
         AtomicInteger signCalls = new AtomicInteger();
         byte[] zip = S124ExchangeSetFactory.builder()
                 .datasets(List.of(stillActive))
@@ -1907,27 +1928,222 @@ class S124ExchangeSetFactoryTest {
         assertThat(meta.stream().filter(m -> m.getPurpose() == S100Purpose.NEW_DATASET).count()).isEqualTo(1);
     }
 
+    /**
+     * A cancellation-only exchange set is valid S-100 Part 17 and none of the four ways of S-124
+     * clause 9.3, both of whose producer-initiated ways deliver a cancellation dataset "as well
+     * as including a fileless cancellation". It is rejected before anything is signed.
+     */
     @Test
-    void buildsCancellationOnlyExchangeSet() throws Exception {
+    void rejectsACancellationOnlyExchangeSet() throws Exception {
         S124ExchangeSetFactory.Cancellation cancellation = cancellationOf(newDataset("DK.S124.seed"));
 
-        byte[] zip = S124ExchangeSetFactory.builder()
+        S124ExchangeSetFactory factory = S124ExchangeSetFactory.builder()
                 .cancellations(List.of(cancellation)) // no datasets at all
                 .organization("DMA")
                 .producerCode("DK00")
                 .certificatePem(testCertPem)
                 .signer((alg, payload) -> DUMMY_SIGNATURE)
                 .phone("+4572196000")
+                .build();
+
+        assertThatThrownBy(factory::toBytes)
+                .isInstanceOf(S124ConformanceException.class)
+                .hasMessageContaining("S-124 clause 9.3")
+                .hasMessageContaining("no dataset");
+    }
+
+    /**
+     * The other half of S-124 clause 9.3: a fileless cancellation that no packaged dataset
+     * names with a References of referenceCategory 1 would withdraw a warning with no
+     * cancellation message for the user to review, and is rejected.
+     */
+    @Test
+    void rejectsAFilelessCancellationThatNoPackagedDatasetNames() throws Exception {
+        S124ExchangeSetFactory.Cancellation cancellation = cancellationOf(newDataset("DK.S124.unnamed"));
+
+        S124ExchangeSetFactory factory = publisher()
+                .datasets(List.of(newDataset("DK.S124.unrelated")))
+                .cancellations(List.of(cancellation))
+                .build();
+
+        assertThatThrownBy(factory::toBytes)
+                .isInstanceOf(S124ConformanceException.class)
+                .hasMessageContaining("S-124 clause 9.3")
+                .hasMessageContaining(cancellation.original().getDatasetID())
+                .hasMessageContaining("named by no packaged dataset");
+    }
+
+    /**
+     * And the reverse: a dataset that cancels a message with a References of referenceCategory
+     * 1 must travel with the fileless cancellation of that message's dataset, or the withdrawn
+     * dataset stays loaded - clause 9.2 keeps every dataset valid until cancelled.
+     */
+    @Test
+    void rejectsAWarningCancellationWithoutTheFilelessCancellation() {
+        S124ExchangeSetFactory factory = publisher()
+                .datasets(List.of(cancellingDatasetOf("DK.S124.cancels-alone", "urn:mrn:iho:s124:dk:2026:9")))
+                .build();
+
+        assertThatThrownBy(factory::toBytes)
+                .isInstanceOf(S124ConformanceException.class)
+                .hasMessageContaining("S-124 clause 9.3")
+                .hasMessageContaining("urn:mrn:iho:s124:dk:2026:9")
+                .hasMessageContaining("no fileless cancellation")
+                .hasMessageContaining("messagesWithoutDataset");
+    }
+
+    /**
+     * The one legitimate unmatched References: the cancelled message was never published as an
+     * S-124 dataset - broadcast before the service started, say - so there is no file to
+     * withdraw and no signature to reproduce. The producer declares it, by MRN or, for a message
+     * that states none, by its series fields.
+     */
+    @Test
+    void acceptsAWarningCancellationOfAMessageDeclaredToHaveNoDataset() throws Exception {
+        Dataset byMrn = cancellingDatasetOf("DK.S124.cancels-legacy", "urn:mrn:iho:s124:dk:2026:9");
+        Dataset bySeries = cancellingDatasetOf("DK.S124.cancels-unnamed", null);
+
+        byte[] zip = publisher()
+                .datasets(List.of(byMrn, bySeries))
+                .messagesWithoutDataset(List.of(
+                        messageSeriesIdentifier("urn:mrn:iho:s124:dk:2026:9"),
+                        messageSeriesIdentifier(null)))
                 .build()
                 .toBytes();
 
-        Map<String, byte[]> entries = unzip(zip);
-        assertThat(datasetFileCount(entries)).isZero();
+        assertThat(datasetFileCount(unzip(zip))).isEqualTo(2);
+        assertThat(catalogueOf(zip).getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas())
+                .extracting(S100DatasetDiscoveryMetadata::getPurpose)
+                .containsOnly(S100Purpose.NEW_DATASET);
+    }
 
-        List<S100DatasetDiscoveryMetadata> meta = catalogueOf(zip)
-                .getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas();
-        assertThat(meta).hasSize(1);
-        assertThat(meta.get(0).getPurpose()).isEqualTo(S100Purpose.CANCELLATION);
+    /**
+     * A message that states no interoperabilityIdentifier cannot be paired with a cancellation,
+     * whose side of the pairing carries only the MRN; unless declared, it is reported as such.
+     */
+    @Test
+    void rejectsAWarningCancellationThatStatesNoMrnUnlessDeclared() {
+        S124ExchangeSetFactory factory = publisher()
+                .datasets(List.of(cancellingDatasetOf("DK.S124.cancels-unnamed", null)))
+                .build();
+
+        assertThatThrownBy(factory::toBytes)
+                .isInstanceOf(S124ConformanceException.class)
+                .hasMessageContaining("states no interoperabilityIdentifier");
+    }
+
+    /**
+     * A References that states noMessageOnHand names nothing, whatever identifiers are written
+     * alongside it (S-124 clause 4.3), and Table 8-1 requires a warning cancellation to state
+     * false. Such a dataset must not satisfy the pairing: the dataset is rejected on its own
+     * terms first, with the identifiers it wrote never counted.
+     */
+    @Test
+    void rejectsAWarningCancellationThatStatesNoMessageOnHand() throws Exception {
+        S124ExchangeSetFactory.Cancellation cancellation = cancellationOf(newDataset("DK.S124.on-hand"));
+        Dataset cancelling = cancellingDataset("DK.S124.on-hand-cancel", cancellation);
+        membersOf(cancelling).getNavwarnPartsAndNavwarnAreaAffectedsAndTextPlacements().stream()
+                .filter(References.class::isInstance)
+                .map(References.class::cast)
+                .forEach(references -> references.setNoMessageOnHand(true));
+
+        S124ExchangeSetFactory factory = publisher()
+                .datasets(List.of(cancelling))
+                .cancellations(List.of(cancellation))
+                .build();
+
+        assertThatThrownBy(factory::toBytes)
+                .isInstanceOf(S124ConformanceException.class)
+                .hasMessageContaining("noMessageOnHand true")
+                .hasMessageContaining("Table 8-1");
+    }
+
+    /**
+     * The reused signatures get ids of the new catalogue's own. The dataset entries number
+     * theirs sig1, sig2, ... from one, and so did the catalogue each original came from, so in
+     * the clause 9.3 case - a cancellation dataset delivered with the fileless cancellation -
+     * a reproduced id would collide with the new entry's; S-100 Part 15 resolves a signatureRef
+     * by that id, so a catalogue must not carry it twice. The values are untouched.
+     */
+    @Test
+    void reusedSignaturesGetIdsOfTheCancellingCatalogue() throws Exception {
+        S124ExchangeSetFactory.Cancellation first = cancellationOf(newDataset("DK.S124.ids-a"));
+        S124ExchangeSetFactory.Cancellation second = cancellationOf(newDataset("DK.S124.ids-b"));
+        assertThat(dataSignatureOf(first.original()).getId()).isEqualTo("sig1");
+        assertThat(dataSignatureOf(second.original()).getId()).isEqualTo("sig1");
+
+        Dataset cancelling = newDataset("DK.S124.ids-cancel");
+        String preambleId = preambleOf(cancelling).getId();
+        membersOf(cancelling).getNavwarnPartsAndNavwarnAreaAffectedsAndTextPlacements().add(
+                cancellationReference("DK.S124.ids-cancel.REF.1", preambleId, first.original().getDatasetID()));
+        membersOf(cancelling).getNavwarnPartsAndNavwarnAreaAffectedsAndTextPlacements().add(
+                cancellationReference("DK.S124.ids-cancel.REF.2", preambleId, second.original().getDatasetID()));
+        byte[] zip = publisher()
+                .datasets(List.of(cancelling))
+                .cancellations(List.of(first, second))
+                .build()
+                .toBytes();
+
+        S100ExchangeCatalogue catalogue = catalogueOf(zip);
+        assertThat(signatureIdsOf(catalogue)).containsExactly("sig1", "sigC1", "sigC2");
+        List<S100DatasetDiscoveryMetadata> entries =
+                catalogue.getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas();
+        assertThat(dataSignatureOf(entries.get(1)).getValue()).isEqualTo(dataSignatureOf(first.original()).getValue());
+        assertThat(dataSignatureOf(entries.get(2)).getValue()).isEqualTo(dataSignatureOf(second.original()).getValue());
+        // Supplying the originals must not rename their signatures.
+        assertThat(dataSignatureOf(first.original()).getId()).isEqualTo("sig1");
+        assertThat(dataSignatureOf(second.original()).getId()).isEqualTo("sig1");
+    }
+
+    /**
+     * A chained signature whose signatureRef names a signature the entry does not carry cannot
+     * be re-pointed, and is rejected rather than emitted with a reference that resolves to
+     * nothing in the cancelling catalogue.
+     */
+    @Test
+    void reusedSignatureOnSignatureReferencingASignatureOutsideTheEntryIsRejected() throws Exception {
+        S124ExchangeSetFactory.Cancellation seed = cancellationOf(newDataset("DK.S124.dangling-ref"));
+        S100DatasetDiscoveryMetadata original = seed.original();
+        original.getDigitalSignatureValues().add(
+                counterSignature("s3", "sig-of-another-entry", "cerCounterSigner"));
+
+        S124ExchangeSetFactory factory = publisher()
+                .datasets(List.of(cancellingDataset("DK.S124.dangling-ref-cancel", seed)))
+                .cancellations(List.of(new S124ExchangeSetFactory.Cancellation(
+                        original, seed.issueDate(), List.of(),
+                        Map.of("cerCounterSigner", List.of(dataServerPreviousPem, domainCoordinatorPem)))))
+                .build();
+
+        assertThatThrownBy(factory::toBytes)
+                .isInstanceOf(S124ExchangeSetFactory.ExchangeSetException.class)
+                .hasMessageContaining("sig-of-another-entry")
+                .hasMessageContaining("does not carry");
+    }
+
+    /**
+     * The issue time goes with the issue date it qualifies (S-124 clause 12.2.2: "Time of day
+     * at which the data was made available"): the cancellation's when given, otherwise none -
+     * never the original's, which with the new date would name an instant at which nothing
+     * happened.
+     */
+    @Test
+    void cancellationCarriesItsOwnIssueTimeOrNone() throws Exception {
+        S124ExchangeSetFactory.Cancellation dated = cancellationOf(newDataset("DK.S124.issue-time"));
+        assertThat(dated.original().getIssueTime()).as("the original states a time of day").isNotNull();
+
+        S100DatasetDiscoveryMetadata withoutTime =
+                cancellationEntryOf(cancellationExchangeSet(dated, testCertPem, List.of()));
+        assertThat(withoutTime.getIssueDate()).isEqualTo(dated.issueDate());
+        assertThat(withoutTime.getIssueTime()).isNull();
+
+        S124ExchangeSetFactory.Cancellation timed = new S124ExchangeSetFactory.Cancellation(
+                dated.original(), dated.issueDate(), LocalTime.of(14, 30), List.of());
+        S100DatasetDiscoveryMetadata withTime =
+                cancellationEntryOf(cancellationExchangeSet(timed, testCertPem, List.of()));
+        assertThat(withTime.getIssueTime()).isEqualTo(LocalTime.of(14, 30));
+
+        // Supplying the original must not modify it.
+        assertThat(dated.original().getIssueTime()).isNotNull();
     }
 
     @Test
@@ -2105,7 +2321,7 @@ class S124ExchangeSetFactoryTest {
         stored.setFileName(legacyFileName);
 
         byte[] zip = publisher()
-                .datasets(List.of(newDataset("DK.S124.fresh")))
+                .datasets(List.of(cancellingDatasetOf("DK.S124.fresh", stored.getDatasetID())))
                 .cancellations(List.of(new S124ExchangeSetFactory.Cancellation(
                         stored, stored.getIssueDate().plusMonths(4))))
                 .build()
@@ -2127,23 +2343,28 @@ class S124ExchangeSetFactoryTest {
     }
 
     /**
-     * A fileless cancellation publishes nothing, so there is nothing new to record. The signing
-     * chain still comes back: the exchange set is signed like any other.
+     * A fileless cancellation publishes nothing, so only the cancellation dataset it travels
+     * with is recorded. The signing chain still comes back: the exchange set is signed like any
+     * other.
      */
     @Test
-    void cancellationOnlyExchangeSetPublishesNoDatasets() throws Exception {
+    void cancellationRecordsOnlyTheCancellationDataset() throws Exception {
+        S124ExchangeSetFactory.Cancellation cancellation = cancellationOf(newDataset("DK.S124.only-cancel"));
+        Dataset cancelling = cancellingDataset("DK.S124.only-cancel-message", cancellation);
         S124ExchangeSetFactory.ExchangeSet set = publisher()
-                .cancellations(List.of(cancellationOf(newDataset("DK.S124.only-cancel"))))
+                .datasets(List.of(cancelling))
+                .cancellations(List.of(cancellation))
                 .build()
                 .toExchangeSet();
 
-        assertThat(set.datasets()).isEmpty();
+        assertThat(set.datasets())
+                .extracting(S124ExchangeSetFactory.PublishedDataset::dataset)
+                .containsExactly(cancelling);
         assertThat(set.signingCertificatePems()).containsExactly(testCertPem);
-        assertThat(datasetFileCount(unzip(set.bytes()))).isZero();
-        List<S100DatasetDiscoveryMetadata> meta = catalogueOf(set.bytes())
-                .getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas();
-        assertThat(meta).hasSize(1);
-        assertThat(meta.get(0).getPurpose()).isEqualTo(S100Purpose.CANCELLATION);
+        assertThat(datasetFileCount(unzip(set.bytes()))).isEqualTo(1);
+        assertThat(catalogueOf(set.bytes()).getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas())
+                .extracting(S100DatasetDiscoveryMetadata::getPurpose)
+                .containsExactly(S100Purpose.NEW_DATASET, S100Purpose.CANCELLATION);
     }
 
     /**
@@ -2210,8 +2431,7 @@ class S124ExchangeSetFactoryTest {
         Map<String, String> pemById = catalogue.getCertificates().get(0).getCertificates().stream()
                 .collect(Collectors.toMap(S100SECertificateType::getId,
                         S124ExchangeSetFactoryTest::pemOf));
-        String ref = dataSignatureOf(catalogue.getDatasetDiscoveryMetadata()
-                .getS100DatasetDiscoveryMetadatas().get(0)).getCertificateRef();
+        String ref = dataSignatureOf(cancellationEntryOf(catalogue)).getCertificateRef();
 
         assertThat(pemById.get(ref)).isEqualTo(dataServerViaDcPem);
         assertThat(pemById.get("cer1")).as("the current certificate signs the new catalogue")
@@ -2240,13 +2460,14 @@ class S124ExchangeSetFactoryTest {
                 S124ExchangeSetFactory.discoveryMetadataFromXml(storedMetadata);
         LocalDate cancelledOn = original.getIssueDate().plusMonths(4);
         byte[] cancellationZip = publisher()
+                .datasets(List.of(cancellingDatasetOf("DK.S124.end-to-end-cancel", original.getDatasetID())))
                 .cancellations(List.of(new S124ExchangeSetFactory.Cancellation(
                         original, cancelledOn, storedChain)))
                 .build()
                 .toBytes();
 
         // Only the assertions read the shipped artefact; the producer flow above never did.
-        S100DatasetDiscoveryMetadata emitted = firstEntryOf(cancellationZip);
+        S100DatasetDiscoveryMetadata emitted = cancellationEntryOf(cancellationZip);
         assertThat(emitted.getPurpose()).isEqualTo(S100Purpose.CANCELLATION);
         assertThat(emitted.getIssueDate()).isEqualTo(cancelledOn);
         assertThat(emitted.getFileName())
@@ -2256,20 +2477,25 @@ class S124ExchangeSetFactoryTest {
         assertThat(reused.getValue())
                 .as("a fileless cancellation reuses the original signature")
                 .isEqualTo(publishedSignature.getValue());
-        assertThat(reused.getId()).isEqualTo(publishedSignature.getId());
+        assertThat(reused.getId())
+                .as("the reused signature carries an id of the new catalogue's own")
+                .isNotEqualTo(publishedSignature.getId());
         assertThat(reused.getDataStatus()).isEqualTo(publishedSignature.getDataStatus());
         assertThat(reused.getCertificateRef())
                 .as("the signing certificate has not changed, so the entry keeps its id")
                 .isEqualTo(publishedSignature.getCertificateRef());
 
-        // Normalise the two fields the clause excepts, and the rest of the entry is the same
-        // document. The signature is compared above rather than as text: the published entry
-        // writes the substitution group head with an xsi:type and the reproduced one the
-        // S100_SE_SignatureOnData member element, which is the same signature to a reader.
+        // Normalise the two fields the clause excepts - and the issue time, which qualifies the
+        // issue date and was not given for the cancellation - and the rest of the entry is the
+        // same document. The signature is compared above rather than as text, because its
+        // catalogue-local id is reallocated.
         S100DatasetDiscoveryMetadata expected =
                 S124ExchangeSetFactory.discoveryMetadataFromXml(storedMetadata);
         expected.setPurpose(S100Purpose.CANCELLATION);
         expected.setIssueDate(cancelledOn);
+        assertThat(original.getIssueTime()).as("the published entry states a time of day").isNotNull();
+        assertThat(emitted.getIssueTime()).as("which the cancellation does not inherit").isNull();
+        expected.setIssueTime(null);
         assertThat(withoutSignature(marshal(emitted))).isEqualTo(withoutSignature(marshal(expected)));
     }
 
@@ -2396,10 +2622,11 @@ class S124ExchangeSetFactoryTest {
      */
     @Test
     void readDiscoveryMetadataSkipsCancellationEntries() throws Exception {
-        Dataset active = newDataset("DK.S124.still-published");
+        S124ExchangeSetFactory.Cancellation withdrawn = cancellationOf(newDataset("DK.S124.withdrawn"));
+        Dataset active = cancellingDataset("DK.S124.still-published", withdrawn);
         byte[] withUnrelatedCancellation = publisher()
                 .datasets(List.of(active))
-                .cancellations(List.of(cancellationOf(newDataset("DK.S124.withdrawn"))))
+                .cancellations(List.of(withdrawn))
                 .build()
                 .toBytes();
 
@@ -2407,10 +2634,11 @@ class S124ExchangeSetFactoryTest {
                 .containsExactly(datasetFileNameOf("DK.S124.still-published"));
 
         // The same file name published and cancelled in one build: still one key, the live entry.
-        Dataset republished = newDataset("DK.S124.same-name");
+        S124ExchangeSetFactory.Cancellation sameName = cancellationOf(newDataset("DK.S124.same-name"));
+        Dataset republished = cancellingDataset("DK.S124.same-name", sameName);
         byte[] withCollidingCancellation = publisher()
                 .datasets(List.of(republished))
-                .cancellations(List.of(cancellationOf(newDataset("DK.S124.same-name"))))
+                .cancellations(List.of(sameName))
                 .build()
                 .toBytes();
 
@@ -2784,6 +3012,76 @@ class S124ExchangeSetFactoryTest {
             dataset.setMembers(new ObjectFactory().createDatasetMembers());
         }
         return dataset.getMembers();
+    }
+
+    /**
+     * The cancellation dataset S-124 clause 9.3 pairs a fileless cancellation with: a dataset
+     * whose References of referenceCategory 1 (warning cancellation) names the withdrawn message
+     * by the MRN the cancelled entry carries as datasetID.
+     */
+    private static Dataset cancellingDataset(String id, S124ExchangeSetFactory.Cancellation cancellation) {
+        return cancellingDatasetOf(id, cancellation.original().getDatasetID());
+    }
+
+    private static Dataset cancellingDatasetOf(String id, String cancelledDatasetId) {
+        Dataset dataset = newDataset(id);
+        membersOf(dataset).getNavwarnPartsAndNavwarnAreaAffectedsAndTextPlacements()
+                .add(cancellationReference(id + ".REF.1", preambleOf(dataset).getId(), cancelledDatasetId));
+        return dataset;
+    }
+
+    /** A References of referenceCategory 1 naming one message by its MRN (S-124 Table 8-1). */
+    private static References cancellationReference(String id, String preambleId, String cancelledDatasetId) {
+        ObjectFactory of = new ObjectFactory();
+        References references = of.createReferences();
+        references.setId(id);
+        references.setNoMessageOnHand(false);
+        ReferenceCategoryType category = of.createReferenceCategoryType();
+        category.setValue(ReferenceCategoryLabel.WARNING_CANCELLATION);
+        references.setReferenceCategory(category);
+        references.getMessageSeriesIdentifiers().add(messageSeriesIdentifier(cancelledDatasetId));
+        ReferenceType theWarning = new ReferenceTypeImpl();
+        theWarning.setHref("#" + preambleId);
+        theWarning.setRole("theWarning");
+        references.setTheWarning(theWarning);
+        return references;
+    }
+
+    /** A messageSeriesIdentifier of the test series, stating the given MRN (or none). */
+    private static MessageSeriesIdentifierType messageSeriesIdentifier(String interoperabilityIdentifier) {
+        ObjectFactory of = new ObjectFactory();
+        WarningTypeType warningType = of.createWarningTypeType();
+        warningType.setValue(WarningTypeLabel.COASTAL_NAVIGATIONAL_WARNING);
+        MessageSeriesIdentifierType series = of.createMessageSeriesIdentifierType();
+        series.setAgencyResponsibleForProduction("DK00");
+        series.setNameOfSeries("Test Nav. Warn.");
+        series.setWarningNumber(9);
+        series.setYear(2026);
+        series.setWarningType(warningType);
+        series.setInteroperabilityIdentifier(interoperabilityIdentifier);
+        return series;
+    }
+
+    /** The one purpose=cancellation entry of a catalogue. */
+    private static S100DatasetDiscoveryMetadata cancellationEntryOf(S100ExchangeCatalogue catalogue) {
+        List<S100DatasetDiscoveryMetadata> cancellations = catalogue.getDatasetDiscoveryMetadata()
+                .getS100DatasetDiscoveryMetadatas().stream()
+                .filter(m -> m.getPurpose() == S100Purpose.CANCELLATION)
+                .toList();
+        assertThat(cancellations).as("exactly one cancellation entry").hasSize(1);
+        return cancellations.get(0);
+    }
+
+    private static S100DatasetDiscoveryMetadata cancellationEntryOf(byte[] zip) throws Exception {
+        return cancellationEntryOf(catalogueOf(zip));
+    }
+
+    /** Every signature id in the catalogue's dataset entries, in document order. */
+    private static List<String> signatureIdsOf(S100ExchangeCatalogue catalogue) {
+        return catalogue.getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas().stream()
+                .flatMap(entry -> entry.getDigitalSignatureValues().stream())
+                .map(value -> value.getS100SEDigitalSignature().getValue().getId())
+                .toList();
     }
 
     private static StandaloneDigitalSignature unmarshalSignature(String xml) throws Exception {

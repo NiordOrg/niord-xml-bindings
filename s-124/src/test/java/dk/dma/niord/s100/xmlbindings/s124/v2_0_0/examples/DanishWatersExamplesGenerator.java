@@ -1,5 +1,7 @@
 package dk.dma.niord.s100.xmlbindings.s124.v2_0_0.examples;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.StringReader;
@@ -12,7 +14,9 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -24,6 +28,7 @@ import javax.xml.validation.Schema;
 import javax.xml.validation.SchemaFactory;
 import javax.xml.validation.Validator;
 
+import org.grad.eNav.s100.utils.S100ExchangeSetUtils;
 import org.junit.jupiter.api.Test;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.Envelope;
@@ -33,6 +38,9 @@ import org.locationtech.jts.geom.PrecisionModel;
 import org.xml.sax.ErrorHandler;
 import org.xml.sax.SAXParseException;
 
+import dk.dma.niord.s100.catalog._5_2.S100DatasetDiscoveryMetadata;
+import dk.dma.niord.s100.catalog._5_2.S100ExchangeCatalogue;
+import dk.dma.niord.s100.catalog._5_2.S100Purpose;
 import dk.dma.niord.s100.catalog._5_2.S100SEDigitalSignatureReference;
 import dk.dma.niord.s100.xmlbindings.s100.gml.base._5_0.CurveProperty;
 import dk.dma.niord.s100.xmlbindings.s100.gml.base._5_0.PointProperty;
@@ -78,7 +86,10 @@ import dk.dma.niord.s100.xmlbindings.s100.gml.profiles._5_0.AbstractGMLType;
 
 /**
  * Generates example S-124 v2.0.0 navigational warning datasets for Danish waters and
- * S-100 Part 17 exchange sets containing the same warnings.
+ * S-100 Part 17 exchange sets containing the same warnings, plus a worked example of how a
+ * published warning is later withdrawn: a cancellation dataset (S-124 clause 9.3) delivered
+ * together with a fileless cancellation of the original dataset (S-100 Part 17, clause
+ * 17-4.4.1).
  *
  * <p>NOT part of the regular test suite (does not match surefire's default includes).
  * Run explicitly with:</p>
@@ -90,10 +101,9 @@ import dk.dma.niord.s100.xmlbindings.s100.gml.profiles._5_0.AbstractGMLType;
  * Every dataset is validated against the S-124 2.0.0 XSD and every exchange set catalogue
  * against the S-100 5.2.0 exchange catalogue XSD before it is written.</p>
  *
- * <p>Exchange sets are signed with a throwaway EC P-384 key/self-signed certificate created
- * on the fly with {@code openssl} (real ECDSA signatures, verifiable against the certificate
- * written next to the output). If {@code openssl} is unavailable the generator falls back to
- * the repository test certificate and dummy signature bytes.</p>
+ * <p>Exchange sets are signed with a throwaway EC P-384 key and self-signed certificate
+ * generated in the JVM for the run ({@link SigningIdentityFixture}): real ECDSA signatures,
+ * verifiable against the certificate written next to the output.</p>
  */
 class DanishWatersExamplesGenerator {
 
@@ -107,6 +117,12 @@ class DanishWatersExamplesGenerator {
     private static final int FIRST_WARNING_NUMBER = 11;
     /** The in-force bulletin is itself a numbered message in the series. */
     private static final int BULLETIN_NUMBER = 17;
+    /** So is the message that cancels NW 011/26 once the Drogden buoy is back in service. */
+    private static final int CANCELLATION_NUMBER = 18;
+    /** The day the six warnings and the bulletin were made into datasets. */
+    private static final LocalDate DATASET_REFERENCE_DATE = LocalDate.of(2026, 8, 25);
+    /** When NW 018/26 is published - a week after the bulletin, which therefore still lists 011/26. */
+    private static final OffsetDateTime CANCELLATION_TIME = OffsetDateTime.of(2026, 9, 1, 10, 0, 0, 0, ZoneOffset.UTC);
 
     /** One example warning: its members plus everything needed for dataset/exchange-set metadata. */
     private record Warning(String compactId, String titleEn, String abstractEn,
@@ -123,6 +139,12 @@ class DanishWatersExamplesGenerator {
         deleteGeneratedFiles(datasetsDir);
         deleteGeneratedFiles(exchangeSetsDir);
         Path signingDir = Files.createDirectories(out.resolve("signing"));
+        // The cancellation example goes to a folder of its own, self-contained and with its own
+        // README, so it can be handed over as it is. Everything in it is generated, so it is
+        // rebuilt from scratch.
+        Path cancellationDir = out.resolve("fileless-cancellation");
+        deleteTree(cancellationDir);
+        Files.createDirectories(cancellationDir);
 
         SignerBundle signer = createSigner(signingDir);
 
@@ -133,13 +155,9 @@ class DanishWatersExamplesGenerator {
         // One dataset per warning, validated against the S-124 XSD.
         List<Dataset> datasets = new ArrayList<>();
         for (Warning w : warnings) {
-            Dataset ds = buildDataset(w.compactId(), w.titleEn(), w.abstractEn(), w.envelope(), w.members());
+            Dataset ds = buildDataset(w, DATASET_REFERENCE_DATE);
             datasets.add(ds);
-            String xml = S124Utils.marshalS124(ds);
-            S124XsdValidator.validate(xml);
-            // Part 10b Table 10b-4 defines datasetFileIdentifier as the file name, so the
-            // standalone copy carries the same name as the packaged one.
-            Files.writeString(datasetsDir.resolve(fileNameOf(ds)), xml);
+            writeDataset(datasetsDir, ds);
             System.out.println("dataset OK  " + w.compactId());
         }
 
@@ -153,35 +171,88 @@ class DanishWatersExamplesGenerator {
             all.expandToInclude(w.envelope());
         }
         Dataset bulletin = buildInForceBulletin(warnings, all);
-        String bulletinXml = S124Utils.marshalS124(bulletin);
-        S124XsdValidator.validate(bulletinXml);
-        Files.writeString(datasetsDir.resolve(fileNameOf(bulletin)), bulletinXml);
+        writeDataset(datasetsDir, bulletin);
         System.out.println("dataset OK  DK-NW-2026-in-force (in-force bulletin)");
 
         // One exchange set per warning, one for the bulletin, and a combined set with all seven.
+        // toExchangeSet() rather than toBytes(): besides the ZIP it hands back the catalogue
+        // entry published for each dataset, which is what a later cancellation must reproduce.
+        List<S124ExchangeSetFactory.ExchangeSet> published = new ArrayList<>();
         for (int i = 0; i < warnings.size(); i++) {
-            byte[] zip = buildExchangeSet(List.of(datasets.get(i)), signer,
+            S124ExchangeSetFactory.ExchangeSet set = buildExchangeSet(List.of(datasets.get(i)), List.of(), signer,
                     "S-124 exchange set with Danish navigational warning " + warnings.get(i).compactId());
-            validateCatalogue(zip, repoRoot);
-            Files.write(exchangeSetsDir.resolve(warnings.get(i).compactId() + ".zip"), zip);
+            validateCatalogue(set.bytes(), repoRoot);
+            Files.write(exchangeSetsDir.resolve(warnings.get(i).compactId() + ".zip"), set.bytes());
+            published.add(set);
             System.out.println("exchange set OK  " + warnings.get(i).compactId() + ".zip");
         }
         // S-124 clause 9.5: every dataset must be delivered in an exchange set, the bulletin
         // included - it needs its own discovery metadata entry like any other dataset.
-        byte[] bulletinZip = buildExchangeSet(List.of(bulletin), signer,
-                "S-124 exchange set with the Danish in-force bulletin");
+        byte[] bulletinZip = buildExchangeSet(List.of(bulletin), List.of(), signer,
+                "S-124 exchange set with the Danish in-force bulletin").bytes();
         validateCatalogue(bulletinZip, repoRoot);
         Files.write(exchangeSetsDir.resolve("DK-NW-2026-in-force.zip"), bulletinZip);
         System.out.println("exchange set OK  DK-NW-2026-in-force.zip");
 
         List<Dataset> allDatasets = new ArrayList<>(datasets);
         allDatasets.add(bulletin);
-        byte[] combinedZip = buildExchangeSet(allDatasets, signer,
-                "S-124 exchange set with all Danish navigational warnings in force");
+        byte[] combinedZip = buildExchangeSet(allDatasets, List.of(), signer,
+                "S-124 exchange set with all Danish navigational warnings in force").bytes();
         validateCatalogue(combinedZip, repoRoot);
         Files.write(exchangeSetsDir.resolve("DK-NW-2026-all.zip"), combinedZip);
         extractZip(combinedZip, exchangeSetsDir.resolve("DK-NW-2026-all"));
         System.out.println("exchange set OK  DK-NW-2026-all.zip (+ extracted copy)");
+
+        // ------------------------------------------------------------------
+        // Cancelling a published warning: S-124 clause 9.3, second bullet - a cancellation
+        // dataset "as well as including a fileless cancellation (see S-100 Part 17, clause
+        // 17-4.4.1) of the dataset being cancelled". Both travel in one exchange set.
+        // ------------------------------------------------------------------
+        Warning cancelled = warnings.get(0);
+        S124ExchangeSetFactory.ExchangeSet originalSet = published.get(0);
+        S124ExchangeSetFactory.PublishedDataset originalEntry = originalSet.datasets().get(0);
+
+        // Step 1 - the exchange set that published the warning, as it was delivered. The same
+        // bytes as exchange-sets/DK-NW-011-26.zip; repeated here so the folder stands alone.
+        Path originalDir = Files.createDirectories(cancellationDir.resolve("1-original"));
+        Files.write(originalDir.resolve(cancelled.compactId() + ".zip"), originalSet.bytes());
+        extractZip(originalSet.bytes(), originalDir.resolve(cancelled.compactId()));
+
+        // Step 2 - what the producer keeps when it publishes: the catalogue entry that announced
+        // the dataset and the certificate chain that signed it. Clause 17-4.4.1 has the
+        // cancellation reproduce the entry "with all other mandatory metadata fields also set to
+        // the same values as the original", so it is stored at publish time, not rebuilt later
+        // from a configuration that may have moved on. Here it is a file; in Niord, a column.
+        Path retainedEntry = Files.createDirectories(cancellationDir.resolve("2-retained"))
+                .resolve(cancelled.compactId() + ".discovery-metadata.xml");
+        Files.writeString(retainedEntry,
+                S124ExchangeSetFactory.discoveryMetadataToXml(originalEntry.discoveryMetadata()));
+
+        // Step 3 - the cancellation message itself, a dataset like any other, and the exchange
+        // set carrying it plus the fileless cancellation of the old dataset, built from the
+        // retained entry. The chain is passed even though the certificate has not changed,
+        // because that is what a producer must do once it has - the reused signature verifies
+        // only with the certificate that made it.
+        Warning relit = drogdenBuoyRelit(cancelled);
+        Dataset cancellationDataset = buildDataset(relit, CANCELLATION_TIME.toLocalDate());
+        validateDataset(cancellationDataset);
+        S124ExchangeSetFactory.Cancellation cancellation = new S124ExchangeSetFactory.Cancellation(
+                S124ExchangeSetFactory.discoveryMetadataFromXml(Files.readString(retainedEntry)),
+                CANCELLATION_TIME.toLocalDate(),
+                originalSet.signingCertificatePems());
+        String cancellationSetName = relit.compactId() + "-cancels-" + cancelled.compactId();
+        byte[] cancellationZip = buildExchangeSet(List.of(cancellationDataset), List.of(cancellation), signer,
+                "S-124 exchange set with Danish navigational warning " + relit.compactId()
+                        + ", cancelling " + cancelled.compactId()).bytes();
+        validateCatalogue(cancellationZip, repoRoot);
+        verifyFilelessCancellation(cancellationZip, originalEntry, fileNameOf(cancellationDataset),
+                CANCELLATION_TIME.toLocalDate());
+        Path cancellingDir = Files.createDirectories(cancellationDir.resolve("3-cancellation"));
+        Files.write(cancellingDir.resolve(cancellationSetName + ".zip"), cancellationZip);
+        extractZip(cancellationZip, cancellingDir.resolve(cancellationSetName));
+        writeCancellationReadme(cancellationDir, cancelled, relit, cancellationSetName);
+        System.out.println("fileless cancellation OK  " + cancellationDir.getFileName() + "/ ("
+                + relit.compactId() + " cancels " + cancelled.compactId() + ")");
 
         writeReadme(out, warnings, signer);
         System.out.println("All examples written to " + out.toAbsolutePath().normalize());
@@ -339,26 +410,60 @@ class DanishWatersExamplesGenerator {
                 GF.createPoint(new Coordinate(9.9040, 57.0570)),
                 "Limfjorden, Aalborg. The railway bridge across Limfjorden is unable to open due to a "
                         + "technical failure. Passage is closed for vessels requiring bridge opening until "
-                        + "further notice. Danish nav. warn. 009/26 is hereby cancelled.",
+                        + "further notice.",
                 "Limfjorden, Aalborg. Jernbanebroen over Limfjorden kan ikke åbnes på grund af en teknisk "
-                        + "fejl. Gennemsejling er indtil videre indstillet for skibe, der kræver broåbning. "
-                        + "Dansk navigationsadvarsel nr. 009/26 annulleres hermed.");
+                        + "fejl. Gennemsejling er indtil videre indstillet for skibe, der kræver broåbning.");
 
-        // Cancellation of the earlier warning 009/26 about the same bridge.
+        // A plain warning. It used to cancel an earlier warning 009/26 with a References of
+        // referenceCategory 1 - but S-124 clause 9.3 pairs such a References with a fileless
+        // cancellation of the cancelled dataset in the same exchange set, and 009/26 has no
+        // dataset in these examples. Cancelling is demonstrated by NW 018/26 instead, in full.
+        return warning(id, "Limfjorden. Aalborg. Railway bridge closed for passage.", pre, part,
+                QualityOfHorizontalMeasurementLabel.PRECISELY_KNOWN); // fixed bridge structure
+    }
+
+    // ------------------------------------------------------------------
+    // The cancellation
+    // ------------------------------------------------------------------
+
+    /**
+     * NW 018/26 - cancels NW 011/26: the Drogden light buoy is back in service.
+     *
+     * <p>S-124 clause 9.3 (second bullet) and Table 8-1 "New dataset with cancellation": one
+     * NavwarnPreamble - a cancellation is itself a numbered message in the series - and one
+     * References with noMessageOnHand false, referenceCategory 1 (warning cancellation) and the
+     * messageSeriesIdentifier of the warning being cancelled. Clause 9.3 has this dataset carry
+     * "only one instance of a References", so there is no NavwarnPart and no geometry: the
+     * dataset conveys nothing but the cancellation. Its discovery metadata still needs an
+     * extent, and the natural one is the cancelled warning's.</p>
+     */
+    private Warning drogdenBuoyRelit(Warning cancelled) {
+        String id = "DK-NW-018-26";
+        String titleEn = "The Sound. Drogden Channel. Light buoy re-established. Nav. warn. 011/26 cancelled.";
+        NavwarnPreamble pre = preamble(id, CANCELLATION_NUMBER, WarningTypeLabel.COASTAL_NAVIGATIONAL_WARNING, 2,
+                NavwarnTypeGeneralLabel.AIDS_TO_NAVIGATION_CHANGES, true, CANCELLATION_TIME,
+                area("The Sound", "Sundet"), locality("Drogden Channel", "Drogden"),
+                titleEn,
+                "Sundet. Drogden. Lystønde genetableret. Navigationsadvarsel 011/26 annulleres.");
+        pre.getAffectedChartPublications().add(chart("DK 134", LocalDate.of(2024, 3, 8)));
+
         References refs = OF.createReferences();
         refs.setId(id + ".REF.1");
         refs.setNoMessageOnHand(false);
         var category = OF.createReferenceCategoryType();
         category.setValue(ReferenceCategoryLabel.WARNING_CANCELLATION);
+        category.setCode(BigInteger.ONE);
         refs.setReferenceCategory(category);
-        refs.getMessageSeriesIdentifiers().add(msi(9, WarningTypeLabel.LOCAL_NAVIGATIONAL_WARNING, 1));
+        // The cancelled warning's own messageSeriesIdentifier, so number, type and
+        // interoperabilityIdentifier are exactly those of the message being withdrawn.
+        refs.getMessageSeriesIdentifiers().add(messageSeriesIdentifierOf(cancelled));
         refs.setTheWarning(href(pre.getId(), "theWarning"));
         pre.getTheReferences().add(href(refs.getId(), "theReferences"));
 
-        Warning w = warning(id, "Limfjorden. Aalborg. Railway bridge closed for passage.", pre, part,
-                QualityOfHorizontalMeasurementLabel.PRECISELY_KNOWN); // fixed bridge structure
-        w.members().add(refs);
-        return w;
+        return new Warning(id, titleEn,
+                "Danish navigational warning " + id + " issued by the " + AGENCY + ", cancelling "
+                        + cancelled.compactId() + ". " + titleEn,
+                new ArrayList<>(List.of(pre, refs)), cancelled.envelope());
     }
 
     // ------------------------------------------------------------------
@@ -449,7 +554,7 @@ class DanishWatersExamplesGenerator {
         return buildDataset(id, "Danish navigational warnings in force",
                 "In-force bulletin listing all Danish navigational warnings in force, issued by the "
                         + AGENCY + ".",
-                envelope, List.of(pre, refs));
+                envelope, List.of(pre, refs), DATASET_REFERENCE_DATE);
     }
 
     /** The messageSeriesIdentifier a warning declares in its own NavwarnPreamble. */
@@ -462,14 +567,30 @@ class DanishWatersExamplesGenerator {
                 .getMessageSeriesIdentifier();
     }
 
-    /** Remove previously generated datasets/exchange sets so stale names cannot survive a rename. */
+    /**
+     * Remove previously generated datasets/exchange sets so stale names cannot survive a rename.
+     * Extracted copies are directories, so those go too.
+     */
     private void deleteGeneratedFiles(Path dir) throws IOException {
         try (var entries = Files.list(dir)) {
             for (Path f : entries.toList()) {
                 String n = f.getFileName().toString();
-                if (Files.isRegularFile(f) && (n.endsWith(".GML") || n.endsWith(".xml") || n.endsWith(".zip"))) {
+                if (Files.isDirectory(f)) {
+                    deleteTree(f);
+                } else if (n.endsWith(".GML") || n.endsWith(".xml") || n.endsWith(".zip")) {
                     Files.delete(f);
                 }
+            }
+        }
+    }
+
+    private static void deleteTree(Path dir) throws IOException {
+        if (!Files.exists(dir)) {
+            return;
+        }
+        try (var walk = Files.walk(dir)) {
+            for (Path p : walk.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                Files.delete(p);
             }
         }
     }
@@ -477,6 +598,22 @@ class DanishWatersExamplesGenerator {
     /** The dataset's own declared file name (S-100 Part 10b, Table 10b-4). */
     private String fileNameOf(Dataset ds) {
         return ds.getDatasetIdentificationInformation().getDatasetFileIdentifier();
+    }
+
+    /**
+     * Marshals the dataset, validates it against the S-124 XSD and writes it under its own
+     * file name - Part 10b Table 10b-4 defines datasetFileIdentifier as the file name, so the
+     * standalone copy carries the same name as the packaged one.
+     */
+    private void writeDataset(Path dir, Dataset ds) throws Exception {
+        Files.writeString(dir.resolve(fileNameOf(ds)), validateDataset(ds));
+    }
+
+    /** Marshals the dataset and validates the XML against the S-124 XSD. */
+    private String validateDataset(Dataset ds) throws Exception {
+        String xml = S124Utils.marshalS124(ds);
+        S124XsdValidator.validate(xml);
+        return xml;
     }
 
     private NavwarnPart part(String id, int n, NavwarnPreamble pre, Geometry jtsGeometry,
@@ -615,8 +752,12 @@ class DanishWatersExamplesGenerator {
         return ref;
     }
 
+    private Dataset buildDataset(Warning w, LocalDate referenceDate) {
+        return buildDataset(w.compactId(), w.titleEn(), w.abstractEn(), w.envelope(), w.members(), referenceDate);
+    }
+
     private Dataset buildDataset(String compactId, String title, String abstractText,
-            Envelope envelope, List<AbstractGMLType> members) {
+            Envelope envelope, List<AbstractGMLType> members, LocalDate referenceDate) {
         Dataset dataset = OF.createDataset();
         dataset.setId(compactId);
 
@@ -631,7 +772,7 @@ class DanishWatersExamplesGenerator {
         // the Part 17 clause 17-4.3 pattern 124<producer><alphanumeric>.GML
         ident.setDatasetFileIdentifier("124DK00" + compactId.replaceAll("[^A-Za-z0-9]", "") + ".GML");
         ident.setDatasetTitle(title);
-        ident.setDatasetReferenceDate(LocalDate.of(2026, 8, 25));
+        ident.setDatasetReferenceDate(referenceDate);
         ident.setDatasetLanguage("eng");
         ident.setDatasetAbstract(abstractText);
         ident.getDatasetTopicCategories().add(
@@ -664,9 +805,11 @@ class DanishWatersExamplesGenerator {
     // Exchange sets and signing
     // ------------------------------------------------------------------
 
-    private byte[] buildExchangeSet(List<Dataset> datasets, SignerBundle signer, String description) {
+    private S124ExchangeSetFactory.ExchangeSet buildExchangeSet(List<Dataset> datasets,
+            List<S124ExchangeSetFactory.Cancellation> cancellations, SignerBundle signer, String description) {
         return S124ExchangeSetFactory.builder()
                 .datasets(datasets)
+                .cancellations(cancellations)
                 .organization(AGENCY)
                 .producerCode("DK00")
                 .certificatePem(signer.certificatePem())
@@ -679,7 +822,7 @@ class DanishWatersExamplesGenerator {
                 .country("Denmark")
                 .description(description)
                 .build()
-                .toBytes();
+                .toExchangeSet();
     }
 
     private record SignerBundle(String certificatePem, S124Signer signer,
@@ -741,6 +884,48 @@ class DanishWatersExamplesGenerator {
         }
     }
 
+    /**
+     * Checks that the cancellation exchange set encodes what S-100 Part 17, clause 17-4.4.1,
+     * describes - the example illustrates that text, so it must not be allowed to drift from it:
+     * no file is shipped for the cancelled dataset, and its entry is the published one with the
+     * purpose and issue date changed and the original signature kept.
+     */
+    private static void verifyFilelessCancellation(byte[] zip, S124ExchangeSetFactory.PublishedDataset original,
+            String cancellationDatasetFileName, LocalDate cancellationDate) throws Exception {
+        Map<String, byte[]> entries = new LinkedHashMap<>();
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zip))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                entries.put(entry.getName(), zis.readAllBytes());
+            }
+        }
+        String datasetFiles = "S100_ROOT/S-124/DATASET_FILES/";
+        assertThat(entries.keySet().stream().filter(n -> n.startsWith(datasetFiles) && !n.endsWith("/")).toList())
+                .as("a fileless cancellation ships no file for the cancelled dataset")
+                .containsExactly(datasetFiles + cancellationDatasetFileName);
+
+        S100ExchangeCatalogue catalogue = S100ExchangeSetUtils.unmarshallS100ExchangeSetCatalogue(
+                new String(entries.get("S100_ROOT/CATALOG.XML"), StandardCharsets.UTF_8));
+        List<S100DatasetDiscoveryMetadata> metadata =
+                catalogue.getDatasetDiscoveryMetadata().getS100DatasetDiscoveryMetadatas();
+        assertThat(metadata).hasSize(2);
+        assertThat(metadata.get(0).getPurpose()).isEqualTo(S100Purpose.NEW_DATASET);
+        assertThat(metadata.get(0).getFileName()).endsWith("/" + cancellationDatasetFileName);
+
+        S100DatasetDiscoveryMetadata cancellation = metadata.get(1);
+        S100DatasetDiscoveryMetadata published = original.discoveryMetadata();
+        assertThat(cancellation.getPurpose()).isEqualTo(S100Purpose.CANCELLATION);
+        assertThat(cancellation.getIssueDate()).isEqualTo(cancellationDate);
+        assertThat(cancellation.getFileName()).isEqualTo(published.getFileName())
+                .endsWith("/" + original.fileName());
+        assertThat(cancellation.getDatasetID()).isEqualTo(published.getDatasetID());
+        assertThat(signatureOf(cancellation)).isEqualTo(signatureOf(published));
+    }
+
+    private static byte[] signatureOf(S100DatasetDiscoveryMetadata entry) {
+        return entry.getDigitalSignatureValues().get(0).getS100SEDigitalSignature().getValue().getValue();
+    }
+
     private static Schema catalogueSchemaCache;
 
     private static synchronized Schema catalogueSchema(Path repoRoot) throws Exception {
@@ -785,8 +970,7 @@ class DanishWatersExamplesGenerator {
         }
         sb.append("\nAll warnings carry bilingual (eng/dan) titles and warning texts. Geometries cover the\n");
         sb.append("three S-124 spatial shapes: points (buoy, container, turbine, bridge), a curve (cable\n");
-        sb.append("route in the Great Belt) and a surface (firing practice area EK D 371 south of Bornholm).\n");
-        sb.append("DK-NW-016-26 additionally demonstrates a `References` member cancelling warning 009/26.\n\n");
+        sb.append("route in the Great Belt) and a surface (firing practice area EK D 371 south of Bornholm).\n\n");
         sb.append("## Layout\n\n");
         sb.append("- `datasets/` - one S-124 GML dataset per warning plus `DK-NW-2026-in-force.xml`,\n");
         sb.append("  an In-Force Bulletin (S-124 clause 8.1.2, Table 8-1): a single NavwarnPreamble\n");
@@ -799,12 +983,112 @@ class DanishWatersExamplesGenerator {
         sb.append("  `DK-NW-2026-all.zip` containing all seven datasets. `DK-NW-2026-all/` is an extracted copy for easy\n");
         sb.append("  inspection. Every CATALOG.XML validates against the S-100 5.2.0 exchange\n");
         sb.append("  catalogue XSD.\n");
+        sb.append("- `fileless-cancellation/` - a self-contained worked example of cancelling DK-NW-011-26:\n");
+        sb.append("  a cancellation dataset delivered together with a fileless cancellation of the original\n");
+        sb.append("  (S-124 clause 9.3, S-100 Part 17 clause 17-4.4.1). It has its own README and can be handed\n");
+        sb.append("  over as it is; nothing in it depends on the rest of this directory.\n");
         sb.append("- `signing/` - the throwaway key/certificate used for the signatures.\n\n");
         sb.append("## Signatures\n\n").append(signer.note()).append("\n\n");
         sb.append("Regenerate with:\n\n");
-        sb.append("```\nmvn -pl s-124 test -Dtest=DanishWatersExamplesGenerator\n```\n");
-        sb.append("(generator source: `generator/DanishWatersExamplesGenerator.java` - copy it back to\n");
-        sb.append("`s-124/src/test/java/dk/dma/niord/s100/xmlbindings/s124/v2_0_0/examples/` first)\n");
+        sb.append("```\nmvn -pl s-124 -am test -Dtest=DanishWatersExamplesGenerator -Dsurefire.failIfNoSpecifiedTests=false\n```\n");
+        sb.append("(generator source: `s-124/src/test/java/dk/dma/niord/s100/xmlbindings/s124/v2_0_0/examples/DanishWatersExamplesGenerator.java`)\n");
         Files.writeString(out.resolve("README.md"), sb.toString());
+    }
+
+    /**
+     * The README of the hand-over folder. It is written for a reader who has only that folder -
+     * the S-124 Project Team, for its Data Classification and Encoding Guide - so it repeats the
+     * scenario and the specification text and refers to nothing outside the folder.
+     */
+    private void writeCancellationReadme(Path dir, Warning cancelled, Warning cancelling,
+            String cancellationSetName) throws IOException {
+        String cancelledFile = "124DK00" + cancelled.compactId().replaceAll("[^A-Za-z0-9]", "") + ".GML";
+        String cancellingFile = "124DK00" + cancelling.compactId().replaceAll("[^A-Za-z0-9]", "") + ".GML";
+        String cancellationDate = CANCELLATION_TIME.toLocalDate().toString();
+        String extractedOriginal = "1-original/" + cancelled.compactId();
+        String extractedCancelling = "3-cancellation/" + cancellationSetName;
+        StringBuilder sb = new StringBuilder();
+        sb.append("# S-124 fileless cancellation - worked example\n\n");
+        sb.append("How a published S-124 navigational warning is cancelled in practice: a cancellation dataset\n");
+        sb.append("delivered together with a fileless cancellation of the original dataset, in one S-100 exchange\n");
+        sb.append("set. Produced by the Danish Maritime Authority with the Niord S-124 bindings\n");
+        sb.append("(https://github.com/NiordOrg/niord-xml-bindings), S-124 Ed 2.0.0 / S-100 Ed 5.2.0.\n\n");
+        sb.append("The warnings are fictitious and NOT for navigation; the exchange sets are marked\n");
+        sb.append("`notForNavigation` and signed with a throwaway self-signed EC P-384 certificate made for this\n");
+        sb.append("run. The signatures themselves are real (ECDSA SHA-384, DER-encoded r,s as S-100 Part 15,\n");
+        sb.append("clause 15-8.4, requires), so they can be verified against the certificate in `CATALOG.XML`.\n\n");
+
+        sb.append("## What S-124 and S-100 say\n\n");
+        sb.append("S-124 clause 9.3 lists the ways an S-124 dataset is cancelled. The one a producer uses when a\n");
+        sb.append("warning is withdrawn before any expiry date is the second: \"Sending a cancellation dataset\n");
+        sb.append("which contains only one instance of a References information type with the referenceType\n");
+        sb.append("attribute set to 1 (cancellation), and the messageReference with the identifier(s) of the\n");
+        sb.append("dataset(s) to be cancelled, as well as including a fileless cancellation (see S-100 Part 17,\n");
+        sb.append("clause 17-4.4.1) of the dataset being cancelled\". So two things travel in one exchange set:\n");
+        sb.append("a new, numbered dataset that says what is cancelled, and a catalogue entry that withdraws the\n");
+        sb.append("old dataset file.\n\n");
+        sb.append("S-100 Part 17, clause 17-4.4.1, defines the latter: \"Fileless cancellation may be achieved by\n");
+        sb.append("using a dataset metadata entry with the filename and original digital signature specifying\n");
+        sb.append("the resource to be cancelled, and with all other mandatory metadata fields also set to the\n");
+        sb.append("same values as the original, with the exception of the issueDate, which must be set to the\n");
+        sb.append("issue date of the fileless cancellation itself.\"\n\n");
+
+        sb.append("## Scenario\n\n");
+        sb.append(cancelled.compactId()).append(" (").append(cancelled.titleEn())
+          .append(") was published on 2026-08-20 as dataset `").append(cancelledFile).append("`.\n");
+        sb.append("On ").append(cancellationDate).append(" the buoy is back in service and the warning is cancelled by ")
+          .append(cancelling.compactId()).append("\n(").append(cancelling.titleEn()).append(").\n\n");
+
+        sb.append("## Folder layout\n\n");
+        sb.append("| Step | Folder | Contents |\n|---|---|---|\n");
+        sb.append("| 1. Publish | `1-original/` | `").append(cancelled.compactId())
+          .append(".zip`, the exchange set that published the warning, and an extracted copy. Its `CATALOG.XML` announces `")
+          .append(cancelledFile).append("` with purpose `newDataset`; the file is in `S-124/DATASET_FILES/`. |\n");
+        sb.append("| 2. Retain | `2-retained/` | `").append(cancelled.compactId())
+          .append(".discovery-metadata.xml`, the `S100_DatasetDiscoveryMetadata` entry from step 1 as the producer keeps it,")
+          .append(" together with the certificate that signed it. The cancellation must reproduce this entry, so it is")
+          .append(" stored at publish time, not rebuilt later. |\n");
+        sb.append("| 3. Cancel | `3-cancellation/` | `").append(cancellationSetName)
+          .append(".zip`, the cancelling exchange set, and an extracted copy: two entries in `CATALOG.XML`, one dataset file")
+          .append(" in `S-124/DATASET_FILES/`. |\n\n");
+
+        sb.append("## What to look at in `").append(extractedCancelling).append("/S100_ROOT/CATALOG.XML`\n\n");
+        sb.append("- The first `S100_DatasetDiscoveryMetadata`, purpose `newDataset`, announces `")
+          .append(cancellingFile).append("`, the\n");
+        sb.append("  cancellation dataset (S-124 Table 8-1 \"New dataset with cancellation\"; the file is in the\n");
+        sb.append("  extracted copy under `S100_ROOT/S-124/DATASET_FILES/`): one NavwarnPreamble, message ")
+          .append(String.format("%03d/%02d", CANCELLATION_NUMBER, YEAR % 100)).append(",\n");
+        sb.append("  and one References with noMessageOnHand false, referenceCategory 1 (warning cancellation) and\n");
+        sb.append("  the messageSeriesIdentifier of ").append(cancelled.compactId())
+          .append(". No NavwarnPart, no geometry.\n");
+        sb.append("- The second, purpose `cancellation`, is the fileless cancellation of `").append(cancelledFile)
+          .append("`. It is\n");
+        sb.append("  the entry from step 1 reproduced - same `fileName`, `datasetID`, bounding box, producing\n");
+        sb.append("  agency and, above all, the same signature value - with two changes of content: `purpose` is\n");
+        sb.append("  `cancellation` and `issueDate` is ").append(cancellationDate)
+          .append(", the date of the cancellation. Diff it against\n");
+        sb.append("  the entry in `").append(extractedOriginal).append("/S100_ROOT/CATALOG.XML` to see this. The\n");
+        sb.append("  only other difference is the signature's `id` attribute, a catalogue-local label: the new\n");
+        sb.append("  catalogue numbers its own dataset signatures from `sig1`, so the reused one is carried as\n");
+        sb.append("  `sigC1` to keep ids unique. Its value and `certificateRef` are unchanged.\n");
+        sb.append("- `S-124/DATASET_FILES/` holds no `").append(cancelledFile)
+          .append("`: nothing is shipped for a cancelled dataset.\n");
+        sb.append("- `CATALOG.SIGN` signs the whole catalogue with the producer's current certificate. The\n");
+        sb.append("  signature reused in the cancellation entry is the one made over the original dataset file\n");
+        sb.append("  when it was published, and still verifies against that file\n");
+        sb.append("  (`").append(extractedOriginal).append("/S100_ROOT/S-124/DATASET_FILES/").append(cancelledFile)
+          .append("`) with the certificate its\n");
+        sb.append("  `certificateRef` points at. Had the producer changed certificate since publishing, the\n");
+        sb.append("  certificate that made the original signature would be carried in `CATALOG.XML` alongside the\n");
+        sb.append("  current one, so the entry can still be verified without external access (S-100 Part 15,\n");
+        sb.append("  clause 15-8.7).\n\n");
+
+        sb.append("## How the producer does it\n\n");
+        sb.append("Keep the catalogue entry and the signing certificate chain of every published dataset (step 2).\n");
+        sb.append("On cancellation, issue the cancellation message as a dataset and add the retained entry, with\n");
+        sb.append("purpose `cancellation` and the cancellation's issue date, to the same exchange set (step 3).\n");
+        sb.append("Both `CATALOG.XML` files here validate against the S-100 5.2.0 exchange catalogue XSD and both\n");
+        sb.append("datasets against the S-124 2.0.0 XSD.\n");
+        Files.writeString(dir.resolve("README.md"), sb.toString());
     }
 }
